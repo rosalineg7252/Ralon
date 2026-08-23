@@ -10,10 +10,16 @@ What has to happen before this is something other people can install, in order.
 
 ## 1. Repository
 
-<https://github.com/stone-main/AgentLock>, default branch `master`. The GitHub
+<https://github.com/RANJEETJ06/AgentLock>, default branch `master`. The GitHub
 repository is `AgentLock`, the crate is `agentlock`, the command is
 `agent-lock`; only the crate name is fixed by crates.io, so leave the rest
 alone rather than churning links.
+
+**Pending transfer.** The repository is to move to another owner. GitHub
+redirects the old URL afterwards, but crates.io stores whatever `repository`
+said at publish time and a published version cannot be edited — so update
+`Cargo.toml` and push the remote change *before* the first `cargo publish`, or
+that link points at a redirect forever.
 
 `.gitignore` excludes `/target` and `.claude`. CI
 (`.github/workflows/ci.yml`) runs `fmt`, `clippy` and the tests on Linux,
