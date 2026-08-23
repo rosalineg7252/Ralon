@@ -1,0 +1,222 @@
+name: Release
+
+# git tag v0.1.1
+#           │
+#           ▼
+#         guard ......... the tag must match Cargo.toml
+#           │
+#     ┌─────┴─────┬───────────┬───────────┬───────────┐
+#     ▼           ▼           ▼           ▼           ▼
+#  linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
+#     └───────────┴─────┬─────┴───────────┴───────────┘
+#                       ▼
+#              GitHub release + binaries
+#                       │
+#                     approve ....... one manual gate, all three are permanent
+#                       │
+#         ┌─────────────┼─────────────┐
+#         ▼             ▼             ▼
+#      crates.io       npm           PyPI
+#     ralon crate   ralon + 5     ralon wheels
+#                  @ralon/* pkgs
+#
+# npm and PyPI ship the *same* binaries this workflow built, not a second
+# compile of the same source.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag that disagrees with Cargo.toml would publish artifacts under a version
+  # that does not exist on crates.io. Catch it before anything is built.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: The tag must match the crate version
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$tag" != "$version" ]; then
+            echo "tag v$tag does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "releasing v$version"
+
+  binaries:
+    needs: guard
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # musl for Linux: a static binary with no glibc version to match,
+          # which is what makes it safe to drop into any container.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: false }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          # `run` refuses on these, but `check` and `status` are what mixed
+          # teams need in CI and pre-commit hooks.
+          - { os: macos-latest, target: aarch64-apple-darwin, cross: false }
+          - { os: macos-latest, target: x86_64-apple-darwin, cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, cross: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # Cross-compiling to aarch64 musl needs a toolchain the runner does not
+      # have; cross supplies one in a container.
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      # Two outputs from one binary: an archive for humans and the GitHub
+      # release, and a bare binary for the npm and PyPI packagers.
+      - name: Package
+        shell: bash
+        run: |
+          executable=ralon
+          [ "${{ runner.os }}" = "Windows" ] && executable=ralon.exe
+
+          mkdir -p "artifacts/${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/$executable" "artifacts/${{ matrix.target }}/"
+
+          staging="ralon-${{ matrix.target }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/$executable" "$staging/"
+          # Apache-2.0 asks redistributors to carry the licence, and nobody
+          # should run this without the chance to read what it does and does
+          # not guarantee.
+          cp README.md LICENSE security.md "$staging/"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            archive="$staging.zip"
+            7z a "$archive" "$staging" > /dev/null
+          else
+            archive="$staging.tar.gz"
+            tar czf "$archive" "$staging"
+          fi
+
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Hand the binary to the packaging jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: artifacts
+          retention-days: 1
+
+      # Archive names follow cargo-binstall's default convention, so
+      # `cargo binstall ralon` finds them without extra metadata.
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body: |
+            `run` enforces on Linux only. The macOS and Windows binaries provide
+            `init`, `check` and `status`, which is what CI and pre-commit hooks
+            need.
+
+            Verify a download against its `.sha256` before trusting it, and read
+            `security.md` for what the guarantee covers — and what it does not.
+
+  # One gate for all three registries. Every one of them is effectively
+  # append-only, so a mistaken tag is not something to find out about
+  # afterwards. Configure `release` under Settings → Environments with a
+  # required reviewer.
+  approve:
+    needs: binaries
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - run: echo "publishing ${GITHUB_REF#refs/tags/}"
+
+  crates-io:
+    needs: approve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  npm:
+    needs: approve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: artifacts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: node packaging/build-npm.mjs --version "${GITHUB_REF#refs/tags/}" --binaries artifacts --out dist
+
+      # Platform packages first: the package users install lists them as
+      # optionalDependencies, and npm cannot install it until they resolve.
+      - name: Publish
+        run: |
+          for package in dist/platforms/*; do
+            npm publish --access public "$package"
+          done
+          npm publish --access public dist/ralon
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi:
+    needs: approve
+    runs-on: ubuntu-latest
+    permissions:
+      # Trusted Publishing: PyPI verifies this workflow's identity, so there is
+      # no long-lived token to leak.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: artifacts
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python packaging/build-wheels.py --version "${GITHUB_REF#refs/tags/}" --binaries artifacts --out dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

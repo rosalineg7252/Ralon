@@ -1,204 +1,214 @@
-# Publishing
+# Releasing Ralon
 
-What has to happen before this is something other people can install, in order.
+`ralon` is on crates.io. `0.1.0` was published by hand from a dirty working
+tree, so it corresponds to no commit; everything from `0.1.1` on is built and
+published by CI from a tag.
 
-## 0. Blockers as things stand
+## What a tag does
 
-- The crate name **`ralon`** is decided but not yet claimed — see step 2.
-- No `CHANGELOG.md`, `CONTRIBUTING.md`, or code of conduct.
-
-## 1. Repository
-
-<https://github.com/stoneware-dev/Ralon>, default branch `master`. Repository,
-crate and command are all `ralon`; only the policy file is different, and
-deliberately so.
-
-It was `RANJEETJ06/AgentLock`, then `stoneware-dev/AgentLock`, before the
-rename. GitHub redirects the old URLs, but crates.io freezes `repository` at
-publish time and a published version cannot be edited, so any further move has
-to reach `Cargo.toml` *before* the next `cargo publish`.
-
-`.gitignore` excludes `/target` and `.claude`; `.gitattributes` normalises line
-endings to LF, which matters because the tests generate shell scripts.
-
-CI (`.github/workflows/ci.yml`) has two jobs:
-
-- **test** — `fmt`, `clippy` and `cargo test` on Linux, Windows and macOS. The
-  enforcement tests report that they tested nothing rather than failing, since
-  a hosted runner's own sandbox may leave no backend available; the Linux job
-  prints `ralon status` so the log always says which.
-- **enforcement** — the real bypass attempts inside a container permissive
-  enough to offer the backends, with `RALON_REQUIRE_BACKEND=1` so the job
-  cannot pass by skipping.
-
-Require both before taking outside contributions. This is a tool whose entire
-value is that its enforcement works, so a green tick that skipped the
-enforcement tests is worse than a red one.
-
-## 2. Claim the name
-
-```console
-$ cargo install ralon
+```
+git tag v0.1.1
+      │
+      ▼
+    guard ......... the tag must match Cargo.toml, or nothing is built
+      │
+┌─────┴─────┬───────────┬───────────┬───────────┐
+▼           ▼           ▼           ▼           ▼
+linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
+└───────────┴─────┬─────┴───────────┴───────────┘
+                  ▼
+         GitHub release + binaries
+                  │
+                approve ....... one manual gate; all three are permanent
+                  │
+    ┌─────────────┼─────────────┐
+    ▼             ▼             ▼
+ crates.io       npm           PyPI
+ralon crate  ralon + 5     ralon wheels
+             @ralon/* pkgs
 ```
 
-`ralon` was free on crates.io, npm and PyPI when this was written, and crates.io
-search returned nothing similar. That is why it was chosen: every descriptive
-name in this space is taken, and two of them badly — `agent-locker` on
-crates.io is an alpha sandbox for coding agents, and `agentlock` on PyPI is an
-authorization framework for agent tool calls. Either would have been confused
-with this project forever.
+`.github/workflows/release.yml` does all of it. npm and PyPI ship the *same*
+binaries the workflow built — not a second compile — so what someone installs
+with `npm i ralon` is byte-identical to the archive on the release page.
 
-An invented name costs discoverability, which the metadata has to pay back: the
-`description` and `keywords` in `Cargo.toml` are what people searching for
-"agent", "sandbox" or "landlock" will actually match on. Keep them accurate.
+The `approve` gate is deliberately manual. Every one of these registries is
+effectively append-only, so a mistaken tag is not something to discover
+afterwards.
 
-Names get taken. Check again immediately before the first publish — this is the
-one step that cannot be undone afterwards:
+## One-time setup
+
+Until these exist the publish jobs fail; the binaries still build.
+
+**GitHub → Settings → Environments → `release`**, with a required reviewer.
+That is the gate above.
+
+**crates.io** → API Tokens → new token, scope *publish-update*, restricted to
+the `ralon` crate → repository secret `CARGO_REGISTRY_TOKEN`.
+
+**npm** — the platform packages live under an `@ralon` scope, which must exist
+first:
 
 ```console
-$ cargo info ralon         # errors if it does not exist yet: good
+$ npm login
+$ npm org create ralon          # free for public packages
 ```
 
-## 3. Fix the metadata
+Then a granular automation token with read+write on `@ralon/*` and `ralon` →
+repository secret `NPM_TOKEN`.
 
-In `Cargo.toml`, before the first publish:
+**PyPI** → Publishing → add a trusted publisher: owner `stoneware-dev`,
+repository `Ralon`, workflow `release.yml`, environment blank. Nothing to
+store; PyPI verifies the workflow over OIDC. For a project that does not exist
+yet, use the pending-publisher form.
 
-- `repository`, and add `homepage` and `documentation` if they differ.
-- Confirm `description`, `keywords` (max 5), `categories` (must be real
-  crates.io categories: `command-line-utilities`, `development-tools` are).
-- `license = "Apache-2.0"` matches `LICENSE`, which holds the canonical text
-  from apache.org verbatim. Keep them in agreement — crates.io shows the SPDX
-  field, not the file.
-- Apache-2.0 brings a patent grant and a termination clause, which is why
-  companies tend to accept it more readily than MIT for infrastructure. It also
-  obliges redistributors to include the license and to note modified files, so
-  keep `LICENSE` in the published tarball (`cargo package --list` should show
-  it).
-- No `NOTICE` file, deliberately: section 4(d) only binds redistributors when
-  one exists, and there is nothing to attribute yet. If you add one, it becomes
-  part of every downstream distribution — keep it to attribution, not release
-  notes.
-- `readme = "README.md"` is already set, so the crates.io page is the README.
-- Consider `exclude = [".github/", "*.md"]` if you would rather not ship the
-  docs in the crate tarball. I would ship them; they are small and the security
-  model is not optional reading.
-- `rust-version = "1.79"` is a promise. CI pins stable, so either add a job on
-  1.79 or raise the field when you use something newer.
-
-## 4. Pre-flight
+## Cutting a release
 
 ```console
-$ cargo fmt --check
-$ cargo clippy --all-targets -- -D warnings
-$ cargo test                              # your platform
+# 1. version — Cargo.toml is the single source of truth for all three registries
+$ vim Cargo.toml                       # version = "0.1.2"
+$ cargo build                          # refreshes Cargo.lock
+$ vim CHANGELOG.md                     # what changed; Security section if relevant
+
+# 2. prove it still enforces — Windows and macOS cannot tell you this
+$ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 $ docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target \
-    -e RALON_REQUIRE_BACKEND=1 \
-    rust:1-bookworm cargo test            # Linux, real attacks, no silent skip
-$ cargo package --list                    # what actually ships
+    -e RALON_REQUIRE_BACKEND=1 rust:1-bookworm cargo test
 $ cargo publish --dry-run
+
+# 3. commit, push, wait for CI
+$ git commit -am "Release v0.1.2" && git push
+
+# 4. tag: builds the binaries, then waits for you
+$ git tag -a v0.1.2 -m "v0.1.2" && git push --tags
+
+# 5. check the release page, verify a checksum, then approve the run in Actions
 ```
 
-The Docker line is not optional for a release. `cargo test` on macOS or Windows
-never touches an enforcement backend, so it cannot tell you whether the thing
-this project exists to do still works.
+The Docker line is not optional. `cargo test` on macOS or Windows never touches
+an enforcement backend, so it cannot tell you whether the thing this project
+exists to do still works. `RALON_REQUIRE_BACKEND=1` turns "no backend
+available, nothing tested" from a pass into a failure.
 
-## 5. Publish
+Check `security.md` still describes reality before every release. Its
+limitations section is the honest part of the pitch and it ages faster than the
+code.
+
+## Trying the packaging without releasing
+
+Both packagers run locally against any binary:
 
 ```console
-$ cargo login                  # token from crates.io/settings/tokens
-$ cargo publish
-$ git tag -a v0.1.0 -m "v0.1.0" && git push --tags
+$ cargo build --release
+$ mkdir -p artifacts/x86_64-unknown-linux-musl
+$ cp target/release/ralon artifacts/x86_64-unknown-linux-musl/
+
+$ node packaging/build-npm.mjs --version 0.1.2 --binaries artifacts --out dist --allow-missing
+$ python packaging/build-wheels.py --version 0.1.2 --binaries artifacts --out dist --allow-missing
+
+$ (cd dist/ralon && npm pack --dry-run)   # what npm would upload
+$ twine check dist/*.whl                  # what PyPI validates on upload
 ```
 
-crates.io is append-only: a published version can be yanked but never replaced.
-Dry-run first, every time.
+`--allow-missing` is what makes a single-platform trial possible. The release
+workflow never passes it: a package whose optionalDependencies were never
+published is broken on install, for everyone.
 
-## 6. Binaries
+## How the wrappers work
 
-Most users of a security tool would rather not compile it. A tag-triggered
-workflow covers it:
+**npm** (`npm/`, assembled by `packaging/build-npm.mjs`) — five packages each
+holding one binary and declaring `os`/`cpu`, so npm downloads only the matching
+one, plus the `ralon` package listing them as `optionalDependencies` whose
+`bin/ralon.js` execs whichever was installed. The shim passes the exit code
+straight through: ralon's codes are its interface (1 = a path is protected,
+2 = error), and a hook that swallowed them would report every policy as
+satisfied. It costs a Node process per invocation, which is why the README
+points at `cargo install` first.
 
-```yaml
-name: Release
-on:
-  push:
-    tags: ["v*"]
+**PyPI** (`packaging/build-wheels.py`) — one wheel per platform, each carrying
+the binary in `ralon-<version>.data/scripts/`, the directory pip installs onto
+PATH with the executable bit set. Nothing is importable; the wheel is only a
+delivery mechanism for `pip install` and `uv tool install`. The Linux wheels
+declare a manylinux *and* a musllinux tag, which one static binary legitimately
+satisfies.
 
-jobs:
-  binaries:
-    strategy:
-      matrix:
-        include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with: { targets: "${{ matrix.target }}" }
-      - run: cargo build --release --target ${{ matrix.target }}
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: target/${{ matrix.target }}/release/ralon*
-```
+`packaging/targets.json` is the single place a Rust target maps to its npm and
+wheel identifiers. Adding a platform means editing it and the workflow matrix,
+nothing else.
 
-Prefer **musl** for the Linux artifacts: a static binary with no glibc version
-to match, which matters for a tool people will drop into containers. Landlock
-and the mount syscalls work the same there.
+## Versioning
 
-Ship macOS and Windows binaries too, clearly labelled: `run` will refuse on
-them, but `check` and `status` are exactly what a mixed-platform team needs in
-CI and in pre-commit hooks. `cargo-binstall` picks these up automatically if the
-asset names follow the default pattern.
-
-## 7. Versioning
-
-While on `0.x`, treat the minor as the breaking position.
+While on `0.x`, the minor is the breaking position.
 
 What counts as breaking is not only the CLI:
 
 - **Policy semantics are the real API.** If a pattern that used to protect a
-  path stops protecting it, that is a breaking change and a security-relevant
-  one, no matter how obscure the pattern.
+  path stops protecting it, that is breaking and security-relevant, however
+  obscure the pattern.
 - Bumping `version:` in `agent.lock` needs a major release and a migration note.
   Old files must keep working, or fail loudly — never be misread.
 - Weakening a guarantee in `security.md`, or dropping a backend, is breaking.
-- New patterns matching *more* is not breaking, but say so in the changelog:
-  people's builds will start failing and they deserve to know why.
+- Matching *more* paths is not breaking, but say so: people's builds will start
+  failing and they deserve to know why.
 
-Keep a `CHANGELOG.md` with a "Security" section per release. When a release
-fixes a bypass, say what could be modified, in which versions, and under which
-backend.
+Keep `CHANGELOG.md` current, with a Security section per release. When a
+release fixes a bypass, say what could be modified, in which versions, and
+under which backend.
 
-## 8. Beyond cargo
+## Metadata that has to stay true
 
-- **Nix / AUR / Homebrew** — community packaging is fine to accept, but the
-  binary must come from a tagged release, not a branch.
-- **Distro packages** — a `.deb` is the highest-value one, since the audience is
-  Linux developers. `cargo-deb` gets there in one command.
-- **Do not** ship a `curl | sh` installer for this. A tool that is supposed to
-  stop untrusted software from writing to your disk should not be installed by
-  piping the internet into a shell.
+- `description` and `keywords` are the whole of discoverability. "ralon" means
+  nothing to a searcher; "agent", "sandbox", "landlock" are what they type.
+- `license = "Apache-2.0"` matches `LICENSE`, which holds the canonical text
+  from apache.org verbatim. crates.io shows the SPDX field, not the file.
+- No `NOTICE` file, deliberately: Apache-2.0 §4(d) only binds redistributors
+  when one exists. Adding one puts it in every downstream distribution — keep
+  it to attribution, not release notes.
+- `rust-version = "1.79"` is a promise. CI pins stable, so either add a job on
+  1.79 or raise the field when you use something newer.
+- `exclude` keeps the release plumbing out of the crate tarball. Crate users
+  get the tool and the documentation that explains its limits, not the npm
+  wrapper.
+- `repository` is frozen per published version. Move the repo again and it must
+  reach `Cargo.toml` before the next publish, or that link is a redirect
+  forever.
 
-## 9. First-release checklist
+## Other ecosystems
 
-- [ ] CI green on all three OSes *and* the `enforcement` job
-- [ ] Crate name confirmed available, `Cargo.toml` metadata filled in
-- [ ] `ralon status` in the CI log shows a backend was actually exercised
-- [ ] `README.md` install command matches the published crate name
-- [ ] `security.md` limitations section is current — that is the honest part of
-      the pitch, and it ages faster than the code
-- [ ] `CHANGELOG.md` started
-- [ ] `cargo publish --dry-run` clean
-- [ ] Tag pushed, binaries attached, release notes point at `security.md`
+Still open, if anyone asks:
 
-## 10. After
+| Target | How | Worth it when |
+| --- | --- | --- |
+| Homebrew, AUR, Nix | community formulas, built from a tagged release — never a branch | someone offers; not worth chasing |
+| `.deb` | `cargo-deb`, one command | the audience is Linux developers, which it is |
 
-Watch for the two failure reports that matter and answer them fast: "it blocked
-something it should not have" (usually the Landlock create-restriction — check
-`--dry-run` output with them), and "it did not block something it should have"
-(a bypass; treat it as a security issue, reproduce it as a test in
-`tests/enforcement.rs` before fixing).
+One standing rule: **do not** ship a `curl \| sh` installer. A tool meant to
+stop untrusted software from writing to your disk should not be installed by
+piping the internet into a shell.
+
+## Things that bite
+
+- **Versions come from the tag**, everywhere. Never edit a version in
+  `npm/package.json`; it is a template, stamped at build time.
+- **Publish order matters on npm.** Platform packages first, then `ralon`. The
+  workflow does this; by hand in the other order you publish a package nobody
+  can install.
+- **Everything is append-only.** crates.io: yank, never replace. npm: unpublish
+  only within 72 hours, deprecate after. PyPI: a deleted version's number can
+  never be reused.
+- **The first run of anything new is the real test.** If npm or PyPI fails
+  after crates.io succeeded, fix forward with a new version — the number is
+  already spent.
+
+## After a release
+
+Two reports matter, and they need opposite responses:
+
+- *"It blocked something it should not have"* — usually the Landlock
+  create-restriction. Ask for `ralon run --dry-run` output; it lists exactly
+  which directories stopped accepting new entries.
+- *"It did not block something it should have"* — a bypass. Treat it as a
+  security issue: reproduce it as a test in `tests/enforcement.rs` first, fix
+  second, and say plainly in the changelog what was exposed and in which
+  versions.

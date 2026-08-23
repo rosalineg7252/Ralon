@@ -183,7 +183,8 @@ Otherwise `run` exits with your command's own status.
   backends work the way they do
 - [`security.md`](security.md) — threat model, what is guaranteed, and the
   limitations that have been tested rather than assumed
-- [`publishing.md`](publishing.md) — release process
+- [`publishing.md`](publishing.md) — cutting a release: what a tag does, and
+  how it reaches crates.io, npm and PyPI
 
 ## Development
 
