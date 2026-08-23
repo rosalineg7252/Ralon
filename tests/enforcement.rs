@@ -1,0 +1,335 @@
+//! Real bypass attempts against a real sandbox.
+//!
+//! Every test here runs a shell inside `agent-lock run` and then checks the
+//! filesystem from outside it. Linux only: there is nothing to enforce with
+//! elsewhere.
+#![cfg(target_os = "linux")]
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+const BINARY: &str = env!("CARGO_BIN_EXE_agent-lock");
+
+const POLICY: &str = "\
+version: 1
+
+protect:
+  - src/index.tsx
+  - .env
+  - config/**
+";
+
+const LOCKED_CONTENT: &str = "original\n";
+
+struct Sandbox {
+    root: PathBuf,
+}
+
+impl Sandbox {
+    fn new() -> Sandbox {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "agent-lock-enforce-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let sandbox = Sandbox { root };
+
+        sandbox.write("agent.lock", POLICY);
+        sandbox.write(".env", LOCKED_CONTENT);
+        sandbox.write("src/index.tsx", LOCKED_CONTENT);
+        sandbox.write("config/db.yaml", LOCKED_CONTENT);
+        sandbox.write("src/App.tsx", "writable\n");
+        sandbox.write("tests/smoke.txt", "writable\n");
+        sandbox
+    }
+
+    fn write(&self, relative: &str, contents: &str) {
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn read(&self, relative: &str) -> String {
+        fs::read_to_string(self.root.join(relative)).unwrap_or_default()
+    }
+
+    fn exists(&self, relative: &str) -> bool {
+        self.root.join(relative).exists()
+    }
+
+    /// Runs `script` with `sh` inside the sandbox.
+    fn attempt(&self, backend: &str, script: &str) -> Output {
+        Command::new(BINARY)
+            .args(["--dir"])
+            .arg(&self.root)
+            .args([
+                "run",
+                "--quiet",
+                "--backend",
+                backend,
+                "--",
+                "sh",
+                "-c",
+                script,
+            ])
+            .current_dir(&self.root)
+            .output()
+            .expect("failed to run agent-lock")
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Backends this kernel can actually provide, as reported by the tool itself.
+fn usable_backends() -> Vec<&'static str> {
+    let probe = Sandbox::new();
+    ["mount", "landlock"]
+        .into_iter()
+        .filter(|backend| {
+            Command::new(BINARY)
+                .arg("--dir")
+                .arg(&probe.root)
+                .args(["run", "--backend", backend, "--dry-run", "--", "true"])
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn for_each_backend(test: impl Fn(&str)) {
+    let backends = usable_backends();
+    assert!(
+        !backends.is_empty(),
+        "no enforcement backend is available on this kernel, so nothing was tested"
+    );
+    for backend in backends {
+        eprintln!("--- backend: {backend}");
+        test(backend);
+    }
+}
+
+/// Every way a program might try to change a protected file.
+const ATTACKS: &[(&str, &str)] = &[
+    ("overwrite", "echo hacked > src/index.tsx"),
+    ("append", "echo hacked >> src/index.tsx"),
+    ("truncate", ": > src/index.tsx"),
+    (
+        "copy over",
+        "echo hacked > /tmp/x && cp /tmp/x src/index.tsx",
+    ),
+    ("delete", "rm -f src/index.tsx"),
+    ("rename away", "mv src/index.tsx src/moved.tsx"),
+    (
+        "replace by rename",
+        "echo hacked > src/tmp.tsx && mv src/tmp.tsx src/index.tsx",
+    ),
+    (
+        "replace by delete and create",
+        "rm -f src/index.tsx; echo hacked > src/index.tsx",
+    ),
+    ("hard link over", "ln -f /etc/hostname src/index.tsx"),
+    ("symlink over", "ln -sf /etc/hostname src/index.tsx"),
+    (
+        "chmod then write",
+        "chmod 777 src/index.tsx; echo hacked > src/index.tsx",
+    ),
+    ("rename the parent", "mv src src-moved"),
+];
+
+#[test]
+fn a_protected_file_survives_every_attack() {
+    for_each_backend(|backend| {
+        for (name, script) in ATTACKS {
+            let sandbox = Sandbox::new();
+            let output = sandbox.attempt(backend, script);
+
+            assert_eq!(
+                sandbox.read("src/index.tsx"),
+                LOCKED_CONTENT,
+                "{backend}/{name}: protected file changed\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                sandbox.exists("src/index.tsx"),
+                "{backend}/{name}: protected file disappeared"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_protected_directory_cannot_be_written_to() {
+    let scripts = [
+        ("write inside", "echo hacked > config/db.yaml"),
+        ("create inside", "echo hacked > config/new.yaml"),
+        ("mkdir inside", "mkdir config/sub"),
+        ("delete inside", "rm -f config/db.yaml"),
+        ("remove the tree", "rm -rf config"),
+        ("rename the tree", "mv config config-moved"),
+    ];
+
+    for_each_backend(|backend| {
+        for (name, script) in scripts {
+            let sandbox = Sandbox::new();
+            let output = sandbox.attempt(backend, script);
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+            assert_eq!(
+                sandbox.read("config/db.yaml"),
+                LOCKED_CONTENT,
+                "{backend}/{name}: protected file changed\nstderr: {stderr}"
+            );
+            assert!(
+                !sandbox.exists("config/new.yaml") && !sandbox.exists("config/sub"),
+                "{backend}/{name}: something was created inside a protected directory"
+            );
+            assert!(
+                sandbox.exists("config"),
+                "{backend}/{name}: the protected directory disappeared"
+            );
+        }
+    });
+}
+
+#[test]
+fn the_policy_file_cannot_be_rewritten() {
+    for_each_backend(|backend| {
+        let sandbox = Sandbox::new();
+        sandbox.attempt(backend, "echo 'version: 1' > agent.lock; rm -f agent.lock");
+        assert_eq!(
+            sandbox.read("agent.lock"),
+            POLICY,
+            "{backend}: agent.lock is not protecting itself"
+        );
+    });
+}
+
+#[test]
+fn unprotected_files_stay_writable() {
+    for_each_backend(|backend| {
+        let sandbox = Sandbox::new();
+
+        let output = sandbox.attempt(
+            backend,
+            "echo changed > src/App.tsx && \
+             echo new > tests/new.txt && \
+             mkdir -p tests/deep && echo new > tests/deep/file.txt && \
+             rm tests/smoke.txt",
+        );
+
+        assert!(
+            output.status.success(),
+            "{backend}: ordinary work was blocked\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(sandbox.read("src/App.tsx"), "changed\n");
+        assert_eq!(sandbox.read("tests/deep/file.txt"), "new\n");
+        assert!(!sandbox.exists("tests/smoke.txt"));
+    });
+}
+
+/// The one place the backends behave differently, and the reason `mount` is
+/// preferred: Landlock cannot grant "create here" without also granting "write
+/// to the protected file here", so directories leading to a protected path stop
+/// accepting new entries.
+#[test]
+fn only_landlock_blocks_new_files_beside_a_protected_one() {
+    for backend in usable_backends() {
+        let sandbox = Sandbox::new();
+        let output = sandbox.attempt(backend, "echo new > notes.md");
+
+        match backend {
+            "mount" => {
+                assert!(
+                    output.status.success(),
+                    "mount: creating a file next to a protected one should work\nstderr: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(sandbox.read("notes.md"), "new\n");
+            }
+            "landlock" => {
+                assert!(!output.status.success(), "landlock: expected this to fail");
+                assert!(!sandbox.exists("notes.md"));
+            }
+            other => unreachable!("unknown backend {other}"),
+        }
+    }
+}
+
+#[test]
+fn the_restriction_is_inherited_by_child_processes() {
+    for_each_backend(|backend| {
+        let sandbox = Sandbox::new();
+        // Two levels of nesting, the second one detached from the shell.
+        sandbox.attempt(
+            backend,
+            "sh -c 'sh -c \"echo hacked > src/index.tsx\"' ; \
+             nohup sh -c 'echo hacked > .env' >/dev/null 2>&1; sleep 0.2",
+        );
+
+        assert_eq!(sandbox.read("src/index.tsx"), LOCKED_CONTENT);
+        assert_eq!(sandbox.read(".env"), LOCKED_CONTENT);
+    });
+}
+
+#[test]
+fn the_sandbox_cannot_be_unmounted_or_bound_around() {
+    let escapes = [
+        ("umount", "umount src/index.tsx; echo hacked > src/index.tsx"),
+        (
+            "bind around the parent",
+            "mkdir -p /tmp/escape && mount --bind . /tmp/escape && echo hacked > /tmp/escape/src/index.tsx",
+        ),
+        (
+            "remount read-write",
+            "mount -o remount,rw src/index.tsx; echo hacked > src/index.tsx",
+        ),
+        (
+            "new namespace",
+            "unshare -Umr sh -c 'echo hacked > src/index.tsx'",
+        ),
+    ];
+
+    if !usable_backends().contains(&"mount") {
+        eprintln!("mount backend unavailable, skipping");
+        return;
+    }
+
+    for (name, script) in escapes {
+        let sandbox = Sandbox::new();
+        let output = sandbox.attempt("mount", script);
+        assert_eq!(
+            sandbox.read("src/index.tsx"),
+            LOCKED_CONTENT,
+            "escaped via {name}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_nonexistent_protected_path_is_reported_not_silently_ignored() {
+    let sandbox = Sandbox::new();
+    fs::remove_file(sandbox.root.join(".env")).unwrap();
+
+    let output = Command::new(BINARY)
+        .arg("--dir")
+        .arg(&sandbox.root)
+        .args(["run", "--dry-run", "--", "true"])
+        .output()
+        .unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("read-only  .env"), "{text}");
+    let warnings = String::from_utf8_lossy(&output.stderr);
+    assert!(warnings.contains("`.env` matches nothing"), "{warnings}");
+}

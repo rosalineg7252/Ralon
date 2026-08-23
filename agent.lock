@@ -1,0 +1,15 @@
+# Agent Lock protects itself with the thing it builds.
+#
+#   .gitignore  → what Git should not track
+#   agent.lock  → what AI-controlled processes cannot modify
+#
+# Patterns are relative to this file. `*` does not cross `/`, `**` does.
+# A directory protects everything beneath it. agent.lock protects itself.
+
+version: 1
+
+protect:
+  # The code that does the actual restricting. Changes here are review-only.
+  - src/enforce/linux.rs
+  - LICENSE
+  - .github/workflows/**

@@ -1,0 +1,35 @@
+[package]
+# The crate is `agentlock`; the command it installs is `agent-lock`, to match
+# the `agent.lock` file it reads. `agent-lock` was already taken on crates.io.
+name = "agentlock"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+description = "Filesystem policy for AI coding agents: kernel-enforced write protection driven by an agent.lock file"
+license = "Apache-2.0"
+repository = "https://github.com/your-org/agentlock"
+readme = "README.md"
+keywords = ["ai", "agent", "sandbox", "landlock", "security"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "agent-lock"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+walkdir = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+libc = "0.2"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
