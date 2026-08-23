@@ -17,8 +17,8 @@ name: Release
 #         ┌─────────────┼─────────────┐
 #         ▼             ▼             ▼
 #      crates.io       npm           PyPI
-#     ralon crate   ralon + 5     ralon wheels
-#                  @ralon/* pkgs
+#     ralon crate   ralon + 5      ralonlock
+#                  @ralon/* pkgs    wheels
 #
 # npm and PyPI ship the *same* binaries this workflow built, not a second
 # compile of the same source.
@@ -127,7 +127,7 @@ jobs:
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Hand the binary to the packaging jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
           path: artifacts
@@ -136,7 +136,7 @@ jobs:
       # Archive names follow cargo-binstall's default convention, so
       # `cargo binstall ralon` finds them without extra metadata.
       - name: Attach to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ env.ARCHIVE }}
@@ -177,12 +177,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           merge-multiple: true
           path: artifacts
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
@@ -209,12 +209,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           merge-multiple: true
           path: artifacts
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
