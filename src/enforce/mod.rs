@@ -61,7 +61,7 @@ impl fmt::Display for Availability {
     }
 }
 
-/// What `agent-lock run` will do, resolved against the current filesystem.
+/// What `ralon run` will do, resolved against the current filesystem.
 pub struct Plan {
     pub backend: Backend,
     /// Canonical paths that must not be modified.

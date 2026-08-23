@@ -1,19 +1,19 @@
 [package]
-# The crate is `agentlock`; the command it installs is `agent-lock`, to match
-# the `agent.lock` file it reads. `agent-lock` was already taken on crates.io.
-name = "agentlock"
+# The policy file stays `agent.lock`: it is the format, and `ralon` is one tool
+# that enforces it. Every descriptive name in this space was taken.
+name = "ralon"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.79"
 description = "Filesystem policy for AI coding agents: kernel-enforced write protection driven by an agent.lock file"
 license = "Apache-2.0"
-repository = "https://github.com/stoneware-dev/AgentLock"
+repository = "https://github.com/stoneware-dev/Ralon"
 readme = "README.md"
 keywords = ["ai", "agent", "sandbox", "landlock", "security"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "agent-lock"
+name = "ralon"
 path = "src/main.rs"
 
 [dependencies]

@@ -31,7 +31,7 @@ jobs:
 
   enforcement:
     # The real bypass attempts, in a container permissive enough to offer the
-    # backends. AGENT_LOCK_REQUIRE_BACKEND turns "nothing was tested" into a
+    # backends. RALON_REQUIRE_BACKEND turns "nothing was tested" into a
     # failure, so this job cannot pass by silently skipping.
     runs-on: ubuntu-latest
     steps:
@@ -43,6 +43,6 @@ jobs:
             --security-opt apparmor=unconfined \
             -v "$PWD:/work" -w /work \
             -e CARGO_TARGET_DIR=/tmp/target \
-            -e AGENT_LOCK_REQUIRE_BACKEND=1 \
+            -e RALON_REQUIRE_BACKEND=1 \
             rust:1-bookworm \
             sh -c 'cargo run --quiet -- status; cargo test --test enforcement -- --nocapture'

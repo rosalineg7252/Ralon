@@ -68,7 +68,7 @@ into. Protecting `node_modules` costs one entry, not two hundred thousand.
 
 ## The mount backend
 
-The default. Sequence, all in the `agent-lock` process before `exec`:
+The default. Sequence, all in the `ralon` process before `exec`:
 
 1. `unshare(CLONE_NEWUSER | CLONE_NEWNS)` — a user namespace grants the
    privileges needed to mount; a mount namespace keeps the mounts out of the
@@ -149,7 +149,7 @@ cannot run.
 Availability is probed honestly. Landlock: `landlock_create_ruleset(NULL, 0,
 LANDLOCK_CREATE_RULESET_VERSION)` returns the ABI version. Mount: `fork` a child
 that attempts the `unshare` and report its errno, because nothing short of
-trying it is trustworthy. Both are reported by `agent-lock status`.
+trying it is trustworthy. Both are reported by `ralon status`.
 
 ## Exit codes
 

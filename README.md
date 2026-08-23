@@ -1,4 +1,4 @@
-# Agent Lock
+# Ralon
 
 A file in your project says what AI agents may not touch:
 
@@ -17,8 +17,8 @@ protect:
 Then you start the agent through it:
 
 ```console
-$ agent-lock run -- claude
-agent-lock: 5 paths locked via the mount backend
+$ ralon run -- claude
+ralon: 5 paths locked via the mount backend
 ```
 
 Inside that process — and every process it spawns, forever — those paths are
@@ -38,8 +38,11 @@ binary, a config file, and two kernel features.
 ## Install
 
 ```console
-$ cargo install agentlock     # the crate is `agentlock`, the command is `agent-lock`
+$ cargo install ralon
 ```
+
+The policy file is called `agent.lock`, not `ralon.lock`, on purpose: it is a
+format, not a product. Anything could enforce it — this is one thing that does.
 
 Or from a checkout:
 
@@ -53,15 +56,15 @@ policies stay checkable in CI and on a laptop of any kind.
 ## Use
 
 ```console
-$ agent-lock init                   # write a starter agent.lock
-$ agent-lock status                 # what is protected, and what this kernel can enforce
-$ agent-lock check src/auth.ts      # is this path protected? exits 1 if it is
-$ agent-lock check                  # list everything the policy protects right now
-$ agent-lock run --dry-run -- npm test    # what would be locked, without locking it
-$ agent-lock run -- claude          # the real thing
+$ ralon init                   # write a starter agent.lock
+$ ralon status                 # what is protected, and what this kernel can enforce
+$ ralon check src/auth.ts      # is this path protected? exits 1 if it is
+$ ralon check                  # list everything the policy protects right now
+$ ralon run --dry-run -- npm test    # what would be locked, without locking it
+$ ralon run -- claude          # the real thing
 ```
 
-`agent-lock run` replaces itself with your command, so the agent keeps its
+`ralon run` replaces itself with your command, so the agent keeps its
 terminal, its exit code, and its signals. There is no supervisor process to kill
 and nothing to keep running in the background.
 
@@ -75,7 +78,7 @@ supports hooks. For Claude Code, in `.claude/settings.json`:
   "hooks": {
     "PreToolUse": [{
       "matcher": "Write|Edit",
-      "hooks": [{ "type": "command", "command": "agent-lock check \"$CLAUDE_FILE_PATH\" >/dev/null || exit 2" }]
+      "hooks": [{ "type": "command", "command": "ralon check \"$CLAUDE_FILE_PATH\" >/dev/null || exit 2" }]
     }]
   }
 }
@@ -107,7 +110,7 @@ protect:            # paths relative to agent.lock
 
 ## What the guarantee actually is
 
-Under `agent-lock run`, for every protected path, in the sandboxed process and
+Under `ralon run`, for every protected path, in the sandboxed process and
 all of its descendants:
 
 | Attempt | Result |
@@ -130,7 +133,7 @@ command starts, so `umount` and bind-mount tricks fail from inside.
 ### Where it stops
 
 - **Only what you launch.** A policy protects the processes started through
-  `agent-lock run`. An agent started some other way is not restricted — the
+  `ralon run`. An agent started some other way is not restricted — the
   point is that you start it this way.
 - **Only what exists.** A protected path that is not on disk yet cannot be
   bind-mounted. `status` and `run` warn about patterns matching nothing. (Under
@@ -143,7 +146,7 @@ command starts, so `umount` and bind-mount tricks fail from inside.
 
 ## Backends
 
-`run` picks the strongest backend the kernel offers. `agent-lock status` shows
+`run` picks the strongest backend the kernel offers. `ralon status` shows
 what is available, and `--backend mount|landlock` pins the choice.
 
 **mount** (default) — read-only bind mounts inside a user + mount namespace,
@@ -195,7 +198,7 @@ namespaces available; Landlock needs 5.13+ with the LSM enabled.
 
 ## License
 
-Copyright 2026 Agent Lock contributors.
+Copyright 2026 Ralon contributors.
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE), or
 <http://www.apache.org/licenses/LICENSE-2.0>.

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::path::Path;
 
-/// Linux is the platform Agent Lock enforces on, and there path comparison is
+/// Linux is the platform Ralon enforces on, and there path comparison is
 /// case sensitive. On case-insensitive filesystems we match case-insensitively:
 /// for a deny list, matching more than asked is the safe direction.
 const CASE_INSENSITIVE: bool = cfg!(any(target_os = "windows", target_os = "macos"));

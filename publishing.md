@@ -4,21 +4,19 @@ What has to happen before this is something other people can install, in order.
 
 ## 0. Blockers as things stand
 
-- The crate publishes as **`agentlock`** (decided), because `agent-lock` is
-  taken on crates.io by an unrelated crate. Not yet claimed — see step 2.
+- The crate name **`ralon`** is decided but not yet claimed — see step 2.
 - No `CHANGELOG.md`, `CONTRIBUTING.md`, or code of conduct.
 
 ## 1. Repository
 
-<https://github.com/stoneware-dev/AgentLock>, default branch `master`. The GitHub
-repository is `AgentLock`, the crate is `agentlock`, the command is
-`agent-lock`; only the crate name is fixed by crates.io, so leave the rest
-alone rather than churning links.
+<https://github.com/stoneware-dev/Ralon>, default branch `master`. Repository,
+crate and command are all `ralon`; only the policy file is different, and
+deliberately so.
 
-It moved here from `RANJEETJ06/AgentLock`. GitHub redirects the old URL, but
-crates.io freezes `repository` at publish time and a published version cannot
-be edited, so any further move has to reach `Cargo.toml` *before* the next
-`cargo publish`.
+It was `RANJEETJ06/AgentLock`, then `stoneware-dev/AgentLock`, before the
+rename. GitHub redirects the old URLs, but crates.io freezes `repository` at
+publish time and a published version cannot be edited, so any further move has
+to reach `Cargo.toml` *before* the next `cargo publish`.
 
 `.gitignore` excludes `/target` and `.claude`; `.gitattributes` normalises line
 endings to LF, which matters because the tests generate shell scripts.
@@ -28,9 +26,9 @@ CI (`.github/workflows/ci.yml`) has two jobs:
 - **test** — `fmt`, `clippy` and `cargo test` on Linux, Windows and macOS. The
   enforcement tests report that they tested nothing rather than failing, since
   a hosted runner's own sandbox may leave no backend available; the Linux job
-  prints `agent-lock status` so the log always says which.
+  prints `ralon status` so the log always says which.
 - **enforcement** — the real bypass attempts inside a container permissive
-  enough to offer the backends, with `AGENT_LOCK_REQUIRE_BACKEND=1` so the job
+  enough to offer the backends, with `RALON_REQUIRE_BACKEND=1` so the job
   cannot pass by skipping.
 
 Require both before taking outside contributions. This is a tool whose entire
@@ -39,26 +37,27 @@ enforcement tests is worse than a red one.
 
 ## 2. Claim the name
 
-The crate is **`agentlock`**. The binary stays **`agent-lock`**, set by
-`[[bin]] name` in `Cargo.toml`, because that is the command people type and it
-mirrors the `agent.lock` file it reads:
-
 ```console
-$ cargo install agentlock      # installs the `agent-lock` binary
+$ cargo install ralon
 ```
 
-`agentlock` was unclaimed when this was written, but names get taken. Check
-again immediately before the first publish — this is the one step that cannot
-be undone afterwards:
+`ralon` was free on crates.io, npm and PyPI when this was written, and crates.io
+search returned nothing similar. That is why it was chosen: every descriptive
+name in this space is taken, and two of them badly — `agent-locker` on
+crates.io is an alpha sandbox for coding agents, and `agentlock` on PyPI is an
+authorization framework for agent tool calls. Either would have been confused
+with this project forever.
+
+An invented name costs discoverability, which the metadata has to pay back: the
+`description` and `keywords` in `Cargo.toml` are what people searching for
+"agent", "sandbox" or "landlock" will actually match on. Keep them accurate.
+
+Names get taken. Check again immediately before the first publish — this is the
+one step that cannot be undone afterwards:
 
 ```console
-$ cargo info agentlock         # errors if it does not exist yet: good
+$ cargo info ralon         # errors if it does not exist yet: good
 ```
-
-Also be aware of the neighbours, and expect to be confused with them:
-`agent-lock` (an unrelated concurrency lock) and `agent-locker` (an alpha
-sandbox for coding agents). Worth a sentence in the README saying what this is
-not.
 
 ## 3. Fix the metadata
 
@@ -94,7 +93,7 @@ $ cargo clippy --all-targets -- -D warnings
 $ cargo test                              # your platform
 $ docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target \
-    -e AGENT_LOCK_REQUIRE_BACKEND=1 \
+    -e RALON_REQUIRE_BACKEND=1 \
     rust:1-bookworm cargo test            # Linux, real attacks, no silent skip
 $ cargo package --list                    # what actually ships
 $ cargo publish --dry-run
@@ -143,7 +142,7 @@ jobs:
       - run: cargo build --release --target ${{ matrix.target }}
       - uses: softprops/action-gh-release@v2
         with:
-          files: target/${{ matrix.target }}/release/agent-lock*
+          files: target/${{ matrix.target }}/release/ralon*
 ```
 
 Prefer **musl** for the Linux artifacts: a static binary with no glibc version
@@ -188,7 +187,7 @@ backend.
 
 - [ ] CI green on all three OSes *and* the `enforcement` job
 - [ ] Crate name confirmed available, `Cargo.toml` metadata filled in
-- [ ] `agent-lock status` in the CI log shows a backend was actually exercised
+- [ ] `ralon status` in the CI log shows a backend was actually exercised
 - [ ] `README.md` install command matches the published crate name
 - [ ] `security.md` limitations section is current — that is the honest part of
       the pitch, and it ages faster than the code

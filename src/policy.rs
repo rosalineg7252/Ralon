@@ -12,7 +12,7 @@ pub const POLICY_FILE: &str = "agent.lock";
 /// The only policy version this build understands.
 pub const CURRENT_VERSION: u32 = 1;
 
-/// Written by `agent-lock init`.
+/// Written by `ralon init`.
 pub const TEMPLATE: &str = "\
 version: 1
 
@@ -55,7 +55,7 @@ impl Policy {
     pub fn load(start: &Path) -> Result<Policy> {
         let root = Policy::find_root(start).with_context(|| {
             format!(
-                "no {POLICY_FILE} found in {} or any parent directory (run `agent-lock init`)",
+                "no {POLICY_FILE} found in {} or any parent directory (run `ralon init`)",
                 start.display()
             )
         })?;

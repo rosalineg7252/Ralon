@@ -10,7 +10,7 @@ use crate::enforce::Backend;
 /// `agent.lock` declares what AI-controlled processes may not modify, the same
 /// way `.gitignore` declares what Git may not track.
 #[derive(Debug, Parser)]
-#[command(name = "agent-lock", version, about, long_about = None)]
+#[command(name = "ralon", version, about, long_about = None)]
 pub struct Cli {
     /// Directory to look for agent.lock in (default: the current directory)
     #[arg(short = 'C', long = "dir", global = true, value_name = "DIR")]
@@ -56,7 +56,7 @@ pub enum Command {
         #[arg(short, long)]
         quiet: bool,
 
-        /// Command to run, e.g. `agent-lock run -- claude`
+        /// Command to run, e.g. `ralon run -- claude`
         #[arg(
             value_name = "COMMAND",
             required = true,

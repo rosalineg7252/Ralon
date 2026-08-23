@@ -1,13 +1,13 @@
 # Security model
 
-Agent Lock makes a narrow promise and tries to make it exactly. This document
+Ralon makes a narrow promise and tries to make it exactly. This document
 says what the promise is, what it is not, and which of the claims have been
 tested rather than reasoned about.
 
 ## Threat model
 
 **Defends against:** a process that runs with your privileges, started by you
-through `agent-lock run`, that tries to modify a path the policy protects. That
+through `ralon run`, that tries to modify a path the policy protects. That
 covers the ordinary case — an agent editing a file it should not have touched —
 and the adversarial one: a prompt-injected agent that deliberately goes after
 `.env`, an agent that shells out to `sed`, `python` or `git checkout`, and any
@@ -19,7 +19,7 @@ process it spawns, including ones that outlive it.
   it. This is a guardrail for a tool you invited in, not a defence against an
   attacker who already has your password.
 - **Processes you did not start this way.** The policy binds the process tree
-  under `agent-lock run`. An agent launched directly is unrestricted, and so is
+  under `ralon run`. An agent launched directly is unrestricted, and so is
   a daemon that was already running — a language server, a file-watcher, an
   editor with a remote API. If a sandboxed process can ask one of those to write
   a file, the write happens outside the sandbox. Do not run an IPC-reachable
@@ -33,7 +33,7 @@ process it spawns, including ones that outlive it.
 
 ## What is guaranteed
 
-Inside `agent-lock run`, for every protected path, in that process and every
+Inside `ralon run`, for every protected path, in that process and every
 descendant:
 
 | Attempt | Result |
@@ -64,7 +64,7 @@ kernel offers.
   user namespace marks every inherited mount `MNT_LOCKED`, so `umount` fails and
   `copy_tree` refuses any bind mount that would expose what is underneath.
 - `no_new_privs` is set, so a setuid binary cannot be used to climb out.
-- Nothing supervises the sandbox, so there is nothing to kill. `agent-lock`
+- Nothing supervises the sandbox, so there is nothing to kill. `ralon`
   *becomes* the command.
 
 Two things fall out of the design rather than being enforced by a check:
@@ -118,14 +118,14 @@ the agent after adding files that need protecting.
 
 ```console
 $ cargo test --test enforcement        # every attack, every available backend
-$ agent-lock status                    # what this kernel can actually enforce
-$ agent-lock run --dry-run -- claude   # exactly what will be locked
+$ ralon status                    # what this kernel can actually enforce
+$ ralon run --dry-run -- claude   # exactly what will be locked
 ```
 
 Do not take the tests' word for it either — check by hand:
 
 ```console
-$ agent-lock run -- sh
+$ ralon run -- sh
 $ echo x > .env            # EROFS or EACCES
 $ rm .env                  # denied
 $ echo x > src/App.tsx     # fine
@@ -137,10 +137,10 @@ rather than running it unprotected. A failure to enforce is never silent.
 ## Reporting a vulnerability
 
 A bypass is anything that modifies a protected path from inside
-`agent-lock run` without root, other than the limitations listed above. Please
+`ralon run` without root, other than the limitations listed above. Please
 report it privately — email the maintainers or open a GitHub security advisory —
 with the policy, the command, and the kernel version (`uname -r`) and backend
-(`agent-lock status`). A failing test case in the style of
+(`ralon status`). A failing test case in the style of
 `tests/enforcement.rs` is the most useful possible report.
 
 ## Hardening still on the table

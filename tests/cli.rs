@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const BINARY: &str = env!("CARGO_BIN_EXE_agent-lock");
+const BINARY: &str = env!("CARGO_BIN_EXE_ralon");
 
 /// A throwaway project directory, removed on drop.
 struct Project {
@@ -16,7 +16,7 @@ impl Project {
     fn new(policy: Option<&str>) -> Project {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = format!(
-            "agent-lock-test-{}-{}",
+            "ralon-test-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
@@ -43,7 +43,7 @@ impl Project {
             .arg(&self.root)
             .args(arguments)
             .output()
-            .expect("failed to run agent-lock")
+            .expect("failed to run ralon")
     }
 }
 

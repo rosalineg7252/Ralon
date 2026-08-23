@@ -1,8 +1,8 @@
-# Agent Lock — CLAUDE.md
+# Ralon — CLAUDE.md
 
 ## Project
 
-Agent Lock is an open-source, framework-independent filesystem policy tool for AI-assisted development.
+Ralon is an open-source, framework-independent filesystem policy tool for AI-assisted development.
 
 The project introduces a simple project-level file:
 
@@ -13,7 +13,7 @@ The purpose of `agent.lock` is to declare files and directories that AI agents/p
 The concept is intentionally similar to `.gitignore`:
 
     .gitignore  → tells Git what should not be tracked
-    agent.lock  → tells Agent Lock what AI-controlled processes cannot modify
+    agent.lock  → tells Ralon what AI-controlled processes cannot modify
 
 Example:
 
@@ -70,8 +70,9 @@ protect:
 
 Rust, no runtime dependencies. `cargo build`, `cargo test`.
 
-Crate `agentlock`, binary `agent-lock` — the crates.io name `agent-lock` was
-already taken, and the command matches the `agent.lock` file it reads.
+Crate and command are both `ralon`. The policy file stays `agent.lock` — it is
+the format, and Ralon is one tool that enforces it, which is the point of being
+agent-independent. Do not rename the file after the tool.
 
     src/
       main.rs cli.rs commands.rs   CLI, one function per subcommand
@@ -83,7 +84,7 @@ already taken, and the command matches the `agent.lock` file it reads.
     tests/cli.rs                   CLI behaviour, every platform
     tests/enforcement.rs           real bypass attempts, Linux only
 
-Commands: `agent-lock init | check | status | run`. `run` restricts the current
+Commands: `ralon init | check | status | run`. `run` restricts the current
 process and then `execve`s the command, so the restriction is inherited by every
 descendant and there is no supervisor to bypass.
 

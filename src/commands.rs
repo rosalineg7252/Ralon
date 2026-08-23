@@ -25,7 +25,7 @@ pub fn init(directory: &Path, force: bool) -> Result<ExitCode> {
     }
     std::fs::write(&target, policy::TEMPLATE)?;
     println!("wrote {}", target.display());
-    println!("edit it, then run: agent-lock run -- <your agent>");
+    println!("edit it, then run: ralon run -- <your agent>");
     Ok(ExitCode::from(OK))
 }
 
@@ -137,7 +137,7 @@ pub fn run(
 
     if !quiet {
         eprintln!(
-            "agent-lock: {} locked via the {} backend",
+            "ralon: {} locked via the {} backend",
             count(plan.protected.len(), "path", "paths"),
             plan.backend
         );
@@ -196,7 +196,7 @@ fn count(amount: usize, singular: &str, plural: &str) -> String {
 fn warn_about_unmatched(policy: &Policy, found: &[ProtectedPath]) {
     for pattern in scan::unmatched_patterns(policy.declared_patterns(), found) {
         eprintln!(
-            "agent-lock: warning: `{pattern}` matches nothing on disk, so there is nothing to lock"
+            "ralon: warning: `{pattern}` matches nothing on disk, so there is nothing to lock"
         );
     }
 }

@@ -293,8 +293,8 @@ fn apply_landlock(carve: &Carve) -> Result<()> {
         RulesetStatus::FullyEnforced => Ok(()),
         RulesetStatus::PartiallyEnforced => {
             eprintln!(
-                "agent-lock: warning: this kernel supports only part of the policy; \
-                 run `agent-lock status` for details"
+                "ralon: warning: this kernel supports only part of the policy; \
+                 run `ralon status` for details"
             );
             Ok(())
         }

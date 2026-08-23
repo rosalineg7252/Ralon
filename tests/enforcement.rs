@@ -1,6 +1,6 @@
 //! Real bypass attempts against a real sandbox.
 //!
-//! Every test here runs a shell inside `agent-lock run` and then checks the
+//! Every test here runs a shell inside `ralon run` and then checks the
 //! filesystem from outside it. Linux only: there is nothing to enforce with
 //! elsewhere.
 #![cfg(target_os = "linux")]
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-const BINARY: &str = env!("CARGO_BIN_EXE_agent-lock");
+const BINARY: &str = env!("CARGO_BIN_EXE_ralon");
 
 const POLICY: &str = "\
 version: 1
@@ -31,7 +31,7 @@ impl Sandbox {
     fn new() -> Sandbox {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!(
-            "agent-lock-enforce-{}-{}",
+            "ralon-enforce-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -78,7 +78,7 @@ impl Sandbox {
             ])
             .current_dir(&self.root)
             .output()
-            .expect("failed to run agent-lock")
+            .expect("failed to run ralon")
     }
 }
 
@@ -109,16 +109,16 @@ fn usable_backends() -> Vec<&'static str> {
 ///
 /// A kernel that provides none cannot demonstrate anything, and a green tick
 /// from one would be a lie. Where the kernel is under our control — the
-/// `enforcement` CI job — `AGENT_LOCK_REQUIRE_BACKEND` makes that a failure.
+/// `enforcement` CI job — `RALON_REQUIRE_BACKEND` makes that a failure.
 /// Elsewhere (a laptop, a runner whose own sandbox forbids it) it says so and
 /// stops.
 fn for_each_backend(test: impl Fn(&str)) {
     let backends = usable_backends();
     if backends.is_empty() {
         assert!(
-            std::env::var_os("AGENT_LOCK_REQUIRE_BACKEND").is_none(),
-            "AGENT_LOCK_REQUIRE_BACKEND is set, but this kernel offers no enforcement \
-             backend — run `agent-lock status` to see why"
+            std::env::var_os("RALON_REQUIRE_BACKEND").is_none(),
+            "RALON_REQUIRE_BACKEND is set, but this kernel offers no enforcement \
+             backend — run `ralon status` to see why"
         );
         eprintln!("no enforcement backend on this kernel: nothing was tested");
         return;
