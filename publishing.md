@@ -4,28 +4,23 @@ What has to happen before this is something other people can install, in order.
 
 ## 0. Blockers as things stand
 
-- The project is **not a git repository** yet.
-- `Cargo.toml` has a placeholder: `repository = "https://github.com/your-org/agent-lock"`.
 - The crate publishes as **`agentlock`** (decided), because `agent-lock` is
   taken on crates.io by an unrelated crate. Not yet claimed — see step 2.
 - No `CHANGELOG.md`, `CONTRIBUTING.md`, or code of conduct.
 
-Everything below assumes those are being fixed as you go.
-
 ## 1. Repository
 
-```console
-$ git init
-$ git add .
-$ git commit -m "Agent Lock: agent.lock policies, enforced by the kernel"
-$ gh repo create agentlock --public --source=. --push
-```
+<https://github.com/stone-main/AgentLock>, default branch `master`. The GitHub
+repository is `AgentLock`, the crate is `agentlock`, the command is
+`agent-lock`; only the crate name is fixed by crates.io, so leave the rest
+alone rather than churning links.
 
-`.gitignore` already excludes `/target`. CI (`.github/workflows/ci.yml`) runs
-`fmt`, `clippy` and the tests on Linux, Windows and macOS; on Linux that
-includes the real bypass tests. Turn on branch protection requiring it before
-taking outside contributions — this is a tool whose whole value is that its
-enforcement works.
+`.gitignore` excludes `/target` and `.claude`. CI
+(`.github/workflows/ci.yml`) runs `fmt`, `clippy` and the tests on Linux,
+Windows and macOS on every push to `master` and every pull request; on Linux
+that includes the real bypass tests. Turn on branch protection requiring it
+before taking outside contributions — this is a tool whose whole value is that
+its enforcement works.
 
 ## 2. Claim the name
 
