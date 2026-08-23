@@ -46,7 +46,7 @@ for (const [target, spec] of Object.entries(targets)) {
     continue;
   }
 
-  const name = `@ralon/${spec.npm}`;
+  const name = `@stoneware-dev/${spec.npm}`;
   const directory = join(out, "platforms", spec.npm);
   mkdirSync(join(directory, "bin"), { recursive: true });
   copyFileSync(source, join(directory, "bin", executable));

@@ -8,11 +8,11 @@
 const { spawnSync } = require("node:child_process");
 
 const PACKAGES = {
-  "linux-x64": "@ralon/linux-x64",
-  "linux-arm64": "@ralon/linux-arm64",
-  "darwin-x64": "@ralon/darwin-x64",
-  "darwin-arm64": "@ralon/darwin-arm64",
-  "win32-x64": "@ralon/win32-x64",
+  "linux-x64": "@stoneware-dev/linux-x64",
+  "linux-arm64": "@stoneware-dev/linux-arm64",
+  "darwin-x64": "@stoneware-dev/darwin-x64",
+  "darwin-arm64": "@stoneware-dev/darwin-arm64",
+  "win32-x64": "@stoneware-dev/win32-x64",
 };
 
 function binaryPath() {

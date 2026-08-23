@@ -2,7 +2,9 @@
 
 `ralon` is on crates.io. `0.1.0` was published by hand from a dirty working
 tree, so it corresponds to no commit; everything from `0.1.1` on is built and
-published by CI from a tag.
+published by CI from a tag. crates.io has `0.1.1`; npm and PyPI start at
+`0.1.2`, because the registry configuration for those two was only fixed in
+that release. The versions converge from there.
 
 ## What a tag does
 
@@ -24,8 +26,8 @@ linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
     ┌─────────────┼─────────────┐
     ▼             ▼             ▼
  crates.io       npm           PyPI
-ralon crate  ralon + 5      ralonlock
-             @ralon/*        wheels
+ralon crate  ralon + five   ralonlock
+             @stoneware-dev  wheels
 ```
 
 The command is `ralon` from all three. Only the PyPI *project* is called
@@ -49,15 +51,15 @@ That is the gate above.
 **crates.io** → API Tokens → new token, scope *publish-update*, restricted to
 the `ralon` crate → repository secret `CARGO_REGISTRY_TOKEN`.
 
-**npm** — the platform packages live under an `@ralon` scope, which must exist
+**npm** — the platform packages live under an `@stoneware-dev` scope, which must exist
 first:
 
 ```console
 $ npm login
-$ npm org create ralon          # free for public packages
+$ npm org create stoneware-dev          # free for public packages
 ```
 
-Then a granular automation token with read+write on `@ralon/*` and `ralon` →
+Then a granular automation token with read+write on `@stoneware-dev/*` and `ralon` →
 repository secret `NPM_TOKEN`.
 
 **PyPI** — the project is **`ralonlock`**, not `ralon`. Publishing → add a
@@ -191,6 +193,30 @@ Still open, if anyone asks:
 One standing rule: **do not** ship a `curl \| sh` installer. A tool meant to
 stop untrusted software from writing to your disk should not be installed by
 piping the internet into a shell.
+
+## When a publish job fails
+
+The jobs are independent, so one registry failing does not roll back another.
+Fix the configuration and use **Re-run failed jobs** on the same run: a re-run
+reads the workflow from the tag, so anything that needs a *workflow* change
+needs a new tag, but configuration changes do not.
+
+**npm: `404 Not Found - PUT .../@stoneware-dev%2f<platform>`** — the scope does
+not exist, or the token cannot write to it. npm answers 404 rather than 403 so
+the endpoint cannot be used to probe for private packages, which makes it look
+like the wrong error. Run `npm org create stoneware-dev` and give the token read+write
+on `@stoneware-dev/*`. A token problem alone would be 401.
+
+**PyPI: `invalid-publisher: valid token, but no corresponding publisher`** —
+the OIDC claims do not match the trusted publisher. The log prints the claims;
+compare them field by field with the PyPI configuration. The usual culprit is
+`environment`: the `pypi` job declares none, so the claim is `MISSING`, and a
+publisher configured with an environment name will never match. Either leave
+the publisher's environment blank, or add `environment:` to the job and name it
+identically.
+
+**crates.io: `crate version already exists`** — that version is spent. Bump and
+tag again; do not try to work around it.
 
 ## Things that bite
 

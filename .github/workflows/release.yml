@@ -17,8 +17,8 @@ name: Release
 #         ┌─────────────┼─────────────┐
 #         ▼             ▼             ▼
 #      crates.io       npm           PyPI
-#     ralon crate   ralon + 5      ralonlock
-#                  @ralon/* pkgs    wheels
+#     ralon crate   ralon + five   ralonlock
+#                   @stoneware-dev  wheels
 #
 # npm and PyPI ship the *same* binaries this workflow built, not a second
 # compile of the same source.

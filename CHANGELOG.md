@@ -4,9 +4,22 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## 0.1.2
+
+No change to what Ralon does. `0.1.1` reached crates.io but not npm or PyPI,
+which needed configuration that could only be fixed by releasing again — the
+packaging scripts are read from the tag, so a re-run could not pick them up.
+npm and PyPI therefore start at `0.1.2`.
+
+- npm platform packages are scoped `@stoneware-dev/<platform>`; `@ralon` was
+  already taken. The package users install is still the unscoped `ralon`.
+- Release workflow actions moved to their Node 24 versions, clearing the
+  deprecation warnings.
+
 ## 0.1.1
 
-No change to what Ralon does or to what a policy means. This release exists so
+Published to crates.io only. No change to what Ralon does or to what a policy
+means. This release exists so
 there is one that was built and published by CI from a tagged commit, and to
 claim the name on npm and PyPI with the same binaries.
 
@@ -16,7 +29,7 @@ claim the name on npm and PyPI with the same binaries.
   SHA-256 checksums. Linux builds are static musl, so they run anywhere,
   including containers with no glibc. `cargo binstall ralon` works.
 - `npm install ralon` — the binaries wrapped as `ralon` plus five
-  `@ralon/<platform>` packages, so npm downloads only the one that matches.
+  `@stoneware-dev/<platform>` packages, so npm downloads only the one that matches.
 - `pip install ralonlock` / `uv tool install ralonlock` — the same binaries as
   wheels. The PyPI project is `ralonlock` because `ralon` was unavailable
   there; the command it installs is still `ralon`.
