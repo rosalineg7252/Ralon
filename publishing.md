@@ -10,23 +10,32 @@ What has to happen before this is something other people can install, in order.
 
 ## 1. Repository
 
-<https://github.com/RANJEETJ06/AgentLock>, default branch `master`. The GitHub
+<https://github.com/stoneware-dev/AgentLock>, default branch `master`. The GitHub
 repository is `AgentLock`, the crate is `agentlock`, the command is
 `agent-lock`; only the crate name is fixed by crates.io, so leave the rest
 alone rather than churning links.
 
-**Pending transfer.** The repository is to move to another owner. GitHub
-redirects the old URL afterwards, but crates.io stores whatever `repository`
-said at publish time and a published version cannot be edited — so update
-`Cargo.toml` and push the remote change *before* the first `cargo publish`, or
-that link points at a redirect forever.
+It moved here from `RANJEETJ06/AgentLock`. GitHub redirects the old URL, but
+crates.io freezes `repository` at publish time and a published version cannot
+be edited, so any further move has to reach `Cargo.toml` *before* the next
+`cargo publish`.
 
-`.gitignore` excludes `/target` and `.claude`. CI
-(`.github/workflows/ci.yml`) runs `fmt`, `clippy` and the tests on Linux,
-Windows and macOS on every push to `master` and every pull request; on Linux
-that includes the real bypass tests. Turn on branch protection requiring it
-before taking outside contributions — this is a tool whose whole value is that
-its enforcement works.
+`.gitignore` excludes `/target` and `.claude`; `.gitattributes` normalises line
+endings to LF, which matters because the tests generate shell scripts.
+
+CI (`.github/workflows/ci.yml`) has two jobs:
+
+- **test** — `fmt`, `clippy` and `cargo test` on Linux, Windows and macOS. The
+  enforcement tests report that they tested nothing rather than failing, since
+  a hosted runner's own sandbox may leave no backend available; the Linux job
+  prints `agent-lock status` so the log always says which.
+- **enforcement** — the real bypass attempts inside a container permissive
+  enough to offer the backends, with `AGENT_LOCK_REQUIRE_BACKEND=1` so the job
+  cannot pass by skipping.
+
+Require both before taking outside contributions. This is a tool whose entire
+value is that its enforcement works, so a green tick that skipped the
+enforcement tests is worse than a red one.
 
 ## 2. Claim the name
 
@@ -83,9 +92,10 @@ In `Cargo.toml`, before the first publish:
 $ cargo fmt --check
 $ cargo clippy --all-targets -- -D warnings
 $ cargo test                              # your platform
-$ docker run --rm --security-opt seccomp=unconfined \
+$ docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target \
-    rust:1-bookworm cargo test            # Linux, both backends, real attacks
+    -e AGENT_LOCK_REQUIRE_BACKEND=1 \
+    rust:1-bookworm cargo test            # Linux, real attacks, no silent skip
 $ cargo package --list                    # what actually ships
 $ cargo publish --dry-run
 ```
@@ -176,9 +186,9 @@ backend.
 
 ## 9. First-release checklist
 
-- [ ] `git init`, first commit, repository pushed, CI green on all three OSes
+- [ ] CI green on all three OSes *and* the `enforcement` job
 - [ ] Crate name confirmed available, `Cargo.toml` metadata filled in
-- [ ] Linux tests run in Docker with both backends exercised
+- [ ] `agent-lock status` in the CI log shows a backend was actually exercised
 - [ ] `README.md` install command matches the published crate name
 - [ ] `security.md` limitations section is current — that is the honest part of
       the pitch, and it ages faster than the code

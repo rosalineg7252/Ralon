@@ -202,13 +202,12 @@ fn dry_run_describes_what_would_be_locked() {
     assert!(text.contains("read-only  agent.lock"), "{text}");
     assert!(text.contains("echo hello"), "{text}");
 
-    if cfg!(target_os = "linux") {
-        assert_eq!(code(&output), 0, "{}", stderr(&output));
-    } else {
-        // Nothing can be enforced off Linux, and the tool must say so instead
-        // of pretending it worked.
-        assert_eq!(code(&output), 1);
-        assert!(text.contains("would fail"), "{text}");
+    // The plan is always shown. Whether it could be enforced depends on the
+    // kernel, and the tool must say which instead of pretending either way.
+    match code(&output) {
+        0 => assert!(!text.contains("would fail"), "{text}"),
+        1 => assert!(text.contains("would fail"), "{text}"),
+        other => panic!("unexpected exit code {other}\n{text}\n{}", stderr(&output)),
     }
 }
 

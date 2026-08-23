@@ -58,10 +58,18 @@ fn exec(command: &[OsString]) -> anyhow::Error {
 // ---------------------------------------------------------------------------
 
 pub fn mount_availability() -> Availability {
-    // Bind mounts need privileges we can only get from a user namespace, and
-    // the only honest test is to create one — in a child process, so the probe
-    // cannot affect this one.
-    match probe(|| unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) }) {
+    // Enforcement needs *two* nested user namespaces: one to mount in, and a
+    // second one to lock those mounts. A host can allow the first and refuse
+    // the second, so probing only the first would advertise a backend that
+    // fails halfway through, after the policy was reported as enforced. Do
+    // exactly what `apply_mount` does instead — in a child process, so the
+    // probe cannot affect this one.
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getgid() };
+    match probe(|| {
+        enter_namespaces(uid, gid)?;
+        enter_namespaces(uid, gid)
+    }) {
         Ok(()) => Availability::Available {
             detail: "read-only bind mounts in a locked namespace".to_string(),
         },
@@ -120,17 +128,16 @@ fn apply_mount(pinned: &[PathBuf], protected: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn enter_namespaces(uid: libc::uid_t, gid: libc::gid_t) -> Result<()> {
+/// Returns `io::Result` so the availability probe can report the errno.
+fn enter_namespaces(uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
     check(unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) })?;
 
     // Map our own ids onto themselves so the sandboxed program keeps the
     // identity it was started with instead of turning into `nobody`.
     // setgroups must be denied before gid_map may be written.
     let _ = std::fs::write("/proc/self/setgroups", "deny");
-    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))
-        .context("failed to write /proc/self/uid_map")?;
-    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))
-        .context("failed to write /proc/self/gid_map")?;
+    std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
+    std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
     Ok(())
 }
 
@@ -315,15 +322,16 @@ fn check(result: libc::c_int) -> io::Result<()> {
 }
 
 /// Runs `action` in a forked child and reports its errno.
-fn probe(action: impl Fn() -> libc::c_int) -> io::Result<()> {
+///
+/// The child only sets up namespaces for itself and exits, so nothing it does
+/// is visible here. This assumes a single-threaded caller, which the binary is.
+fn probe(action: impl Fn() -> io::Result<()>) -> io::Result<()> {
     match unsafe { libc::fork() } {
         -1 => Err(io::Error::last_os_error()),
         0 => {
-            // Async-signal-safe only: one syscall, then straight out.
-            let errno = if action() == 0 {
-                0
-            } else {
-                io::Error::last_os_error().raw_os_error().unwrap_or(1)
+            let errno = match action() {
+                Ok(()) => 0,
+                Err(error) => error.raw_os_error().unwrap_or(1),
             };
             unsafe { libc::_exit(errno.clamp(0, 126)) }
         }

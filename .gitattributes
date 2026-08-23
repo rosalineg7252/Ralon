@@ -1,0 +1,3 @@
+# The tests generate shell scripts and policy files; CRLF reaching `sh` on
+# Linux fails in ways that look like a bug in the tool.
+* text=auto eol=lf
