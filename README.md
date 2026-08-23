@@ -38,17 +38,18 @@ binary, a config file, and two kernel features.
 ## Install
 
 ```console
-$ cargo install ralon
+$ cargo install ralon         # or from a checkout: cargo install --path .
+$ npm install -g ralon        # prebuilt binary, wrapped
+$ pip install ralonlock       # same binary; `ralon` was taken on PyPI
 ```
 
-The policy file is called `agent.lock`, not `ralon.lock`, on purpose: it is a
-format, not a product. Anything could enforce it — this is one thing that does.
+Or download a binary from the
+[releases](https://github.com/stoneware-dev/Ralon/releases) — Linux builds are
+static, so they run in any container.
 
-Or from a checkout:
-
-```console
-$ cargo install --path .
-```
+The command is `ralon` however you install it. The policy file is called
+`agent.lock`, not `ralon.lock`, on purpose: it is a format, not a product.
+Anything could enforce it — this is one thing that does.
 
 The `run` command needs Linux. `init`, `check` and `status` work everywhere, so
 policies stay checkable in CI and on a laptop of any kind.

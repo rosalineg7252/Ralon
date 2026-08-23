@@ -17,7 +17,9 @@ claim the name on npm and PyPI with the same binaries.
   including containers with no glibc. `cargo binstall ralon` works.
 - `npm install ralon` — the binaries wrapped as `ralon` plus five
   `@ralon/<platform>` packages, so npm downloads only the one that matches.
-- `pip install ralon` / `uv tool install ralon` — the same binaries as wheels.
+- `pip install ralonlock` / `uv tool install ralonlock` — the same binaries as
+  wheels. The PyPI project is `ralonlock` because `ralon` was unavailable
+  there; the command it installs is still `ralon`.
 - A tag now publishes to all three registries after one manual approval.
 
 ### Packaging
@@ -25,6 +27,14 @@ claim the name on npm and PyPI with the same binaries.
 - The crate tarball no longer carries the release plumbing (`npm/`,
   `packaging/`, workflows). Crate users still get `README.md`,
   `architecture.md`, `security.md`, `LICENSE` and the tests.
+
+### Fixed
+
+- The musl targets did not compile: `libc::ST_*` is defined only for glibc, so
+  the flags read back before a read-only remount are now spelled out from the
+  kernel's own values. No effect on behaviour — glibc builds were identical —
+  but without it there are no static Linux binaries. CI now compiles the musl
+  target on every push.
 
 ## 0.1.0
 

@@ -3,10 +3,13 @@
 
     python packaging/build-wheels.py --version 0.1.1 --binaries artifacts --out dist
 
+The PyPI project is `ralonlock` — `ralon` was not available there — but the
+command it installs is `ralon`, the same as everywhere else.
+
 Ralon is not a Python library; a wheel is just the delivery mechanism that
-`pip install ralon` and `uv tool install ralon` understand. Each wheel carries
-one binary in its `.data/scripts/` directory, which pip installs onto PATH and
-marks executable. There is nothing to import.
+`pip install ralonlock` and `uv tool install ralonlock` understand. Each wheel
+carries one binary in its `.data/scripts/` directory, which pip installs onto
+PATH and marks executable. There is nothing to import.
 
 Building the wheels here rather than with maturin means the artifact users
 install is byte-identical to the one attached to the GitHub release, instead of
@@ -26,6 +29,9 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# The PyPI project name differs from the crate and the npm package; the binary
+# it installs does not.
+PROJECT = "ralonlock"
 SUMMARY = (
     "Filesystem policy for AI coding agents: kernel-enforced write protection "
     "driven by an agent.lock file"
@@ -43,7 +49,7 @@ def urlsafe_digest(data: bytes) -> str:
 def metadata(version: str, description: str) -> str:
     return (
         "Metadata-Version: 2.1\n"
-        "Name: ralon\n"
+        "Name: " + PROJECT + "\n"
         f"Version: {version}\n"
         f"Summary: {SUMMARY}\n"
         "Author: Ralon contributors\n"
@@ -86,10 +92,10 @@ def build(version: str, target: str, spec: dict, binaries: Path, out: Path) -> P
     # glibc and the musl tag.
     platform_tag = ".".join(tags)
     out.mkdir(parents=True, exist_ok=True)
-    path = out / f"ralon-{version}-py3-none-{platform_tag}.whl"
+    path = out / f"{PROJECT}-{version}-py3-none-{platform_tag}.whl"
 
-    dist_info = f"ralon-{version}.dist-info"
-    data_scripts = f"ralon-{version}.data/scripts"
+    dist_info = f"{PROJECT}-{version}.dist-info"
+    data_scripts = f"{PROJECT}-{version}.data/scripts"
     readme = (ROOT / "npm" / "README.md").read_text(encoding="utf-8")
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
 

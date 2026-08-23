@@ -24,9 +24,12 @@ linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
     ┌─────────────┼─────────────┐
     ▼             ▼             ▼
  crates.io       npm           PyPI
-ralon crate  ralon + 5     ralon wheels
-             @ralon/* pkgs
+ralon crate  ralon + 5      ralonlock
+             @ralon/*        wheels
 ```
+
+The command is `ralon` from all three. Only the PyPI *project* is called
+`ralonlock`, because `ralon` was not available there.
 
 `.github/workflows/release.yml` does all of it. npm and PyPI ship the *same*
 binaries the workflow built — not a second compile — so what someone installs
@@ -57,10 +60,11 @@ $ npm org create ralon          # free for public packages
 Then a granular automation token with read+write on `@ralon/*` and `ralon` →
 repository secret `NPM_TOKEN`.
 
-**PyPI** → Publishing → add a trusted publisher: owner `stoneware-dev`,
-repository `Ralon`, workflow `release.yml`, environment blank. Nothing to
-store; PyPI verifies the workflow over OIDC. For a project that does not exist
-yet, use the pending-publisher form.
+**PyPI** — the project is **`ralonlock`**, not `ralon`. Publishing → add a
+trusted publisher: project `ralonlock`, owner `stoneware-dev`, repository
+`Ralon`, workflow `release.yml`, environment blank. Nothing to store; PyPI
+verifies the workflow over OIDC. For a project that does not exist yet, use the
+pending-publisher form.
 
 ## Cutting a release
 
@@ -127,11 +131,12 @@ satisfied. It costs a Node process per invocation, which is why the README
 points at `cargo install` first.
 
 **PyPI** (`packaging/build-wheels.py`) — one wheel per platform, each carrying
-the binary in `ralon-<version>.data/scripts/`, the directory pip installs onto
-PATH with the executable bit set. Nothing is importable; the wheel is only a
-delivery mechanism for `pip install` and `uv tool install`. The Linux wheels
+the binary in `ralonlock-<version>.data/scripts/`, the directory pip installs
+onto PATH with the executable bit set. Nothing is importable; the wheel is only
+a delivery mechanism for `pip install` and `uv tool install`. The Linux wheels
 declare a manylinux *and* a musllinux tag, which one static binary legitimately
-satisfies.
+satisfies. `PROJECT` at the top of the script is the only place the PyPI name
+lives.
 
 `packaging/targets.json` is the single place a Rust target maps to its npm and
 wheel identifiers. Adding a platform means editing it and the workflow matrix,

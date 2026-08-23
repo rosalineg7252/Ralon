@@ -29,6 +29,16 @@ jobs:
       - if: runner.os == 'Linux'
         run: cargo run --quiet -- status
 
+      # The release ships musl binaries, and musl's libc bindings are not the
+      # same set as glibc's — `libc::ST_*` exists only on glibc. Catching that
+      # here costs seconds; catching it during a release costs a version
+      # number.
+      - name: The musl target must compile too
+        if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo check --all-targets --target x86_64-unknown-linux-musl
+
   enforcement:
     # The real bypass attempts, in a container permissive enough to offer the
     # backends. RALON_REQUIRE_BACKEND turns "nothing was tested" into a

@@ -217,6 +217,16 @@ fn mount_setattr_read_only(target: &CString) -> io::Result<()> {
     }
 }
 
+// `statvfs` flags, as the kernel reports them in `f_flags`. Spelled out here
+// rather than taken from libc, which only defines them for glibc — the musl
+// builds we ship do not compile against `libc::ST_*`.
+const ST_NOSUID: libc::c_ulong = 0x0002;
+const ST_NODEV: libc::c_ulong = 0x0004;
+const ST_NOEXEC: libc::c_ulong = 0x0008;
+const ST_NOATIME: libc::c_ulong = 0x0400;
+const ST_NODIRATIME: libc::c_ulong = 0x0800;
+const ST_RELATIME: libc::c_ulong = 0x1000;
+
 /// The mount flags a user namespace will not let a remount clear.
 fn locked_flags(target: &CString) -> Result<libc::c_ulong> {
     let mut stats: libc::statvfs = unsafe { mem::zeroed() };
@@ -226,12 +236,12 @@ fn locked_flags(target: &CString) -> Result<libc::c_ulong> {
     // ST_* and MS_* are different numbering schemes; ST_RELATIME and MS_BIND
     // even share a value. Translate explicitly.
     let pairs = [
-        (libc::ST_NOSUID, libc::MS_NOSUID),
-        (libc::ST_NODEV, libc::MS_NODEV),
-        (libc::ST_NOEXEC, libc::MS_NOEXEC),
-        (libc::ST_NOATIME, libc::MS_NOATIME),
-        (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-        (libc::ST_RELATIME, libc::MS_RELATIME),
+        (ST_NOSUID, libc::MS_NOSUID),
+        (ST_NODEV, libc::MS_NODEV),
+        (ST_NOEXEC, libc::MS_NOEXEC),
+        (ST_NOATIME, libc::MS_NOATIME),
+        (ST_NODIRATIME, libc::MS_NODIRATIME),
+        (ST_RELATIME, libc::MS_RELATIME),
     ];
     Ok(pairs.iter().fold(0, |flags, (present, wanted)| {
         if stats.f_flag & present != 0 {
