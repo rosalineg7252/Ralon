@@ -51,16 +51,23 @@ That is the gate above.
 **crates.io** → API Tokens → new token, scope *publish-update*, restricted to
 the `ralon` crate → repository secret `CARGO_REGISTRY_TOKEN`.
 
-**npm** — the platform packages live under an `@stoneware-dev` scope, which must exist
-first:
+**npm** — two different kinds of package, which is the thing to get right:
+
+- the five platform packages are **scoped**, `@stoneware-dev/<platform>`, and
+  owned by the org of that name;
+- the package users install, `ralon`, is **unscoped**. Unscoped names live in
+  npm's global namespace and belong to a *user account*, not to any org.
 
 ```console
 $ npm login
 $ npm org create stoneware-dev          # free for public packages
 ```
 
-Then a granular automation token with read+write on `@stoneware-dev/*` and `ralon` →
-repository secret `NPM_TOKEN`.
+The token must therefore cover both. A granular token limited to the
+`@stoneware-dev` scope publishes the five and then fails on `ralon` — with a
+404, because npm will not admit that a package you cannot write to exists. Give
+it read+write on **all packages**, or publish `ralon` once by hand and then add
+it to the token by name. Save it as the repository secret `NPM_TOKEN`.
 
 **PyPI** — the project is **`ralonlock`**, not `ralon`. Publishing → add a
 trusted publisher: project `ralonlock`, owner `stoneware-dev`, repository
@@ -204,8 +211,23 @@ needs a new tag, but configuration changes do not.
 **npm: `404 Not Found - PUT .../@stoneware-dev%2f<platform>`** — the scope does
 not exist, or the token cannot write to it. npm answers 404 rather than 403 so
 the endpoint cannot be used to probe for private packages, which makes it look
-like the wrong error. Run `npm org create stoneware-dev` and give the token read+write
-on `@stoneware-dev/*`. A token problem alone would be 401.
+like the wrong error. Run `npm org create stoneware-dev` and give the token
+read+write on `@stoneware-dev/*`. A token problem alone would be 401.
+
+**npm: the five platform packages publish and `ralon` fails** — the token
+covers the scope but not the unscoped name, as above. The platform packages are
+already up, so the release only needs its last package; there is no reason to
+burn a version:
+
+```console
+$ npm login
+$ node packaging/build-npm.mjs --version 0.1.2 --meta-only --out dist
+$ npm publish --access public dist/ralon
+```
+
+`--meta-only` builds just that package, listing every platform, without needing
+the binaries to hand. Fix the token afterwards so the next release does not
+stop in the same place.
 
 **PyPI: `invalid-publisher: valid token, but no corresponding publisher`** —
 the OIDC claims do not match the trusted publisher. The log prints the claims;

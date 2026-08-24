@@ -191,12 +191,29 @@ jobs:
 
       # Platform packages first: the package users install lists them as
       # optionalDependencies, and npm cannot install it until they resolve.
+      #
+      # Skipping versions that are already up makes this re-runnable. npm
+      # publishes one package at a time, so a failure on the last one used to
+      # leave the job unable to retry: the earlier packages would be rejected
+      # as duplicates.
       - name: Publish
+        shell: bash
         run: |
+          publish() {
+            directory="$1"
+            name=$(node -p "require('./$directory/package.json').name")
+            version=$(node -p "require('./$directory/package.json').version")
+            if npm view "$name@$version" version > /dev/null 2>&1; then
+              echo "$name@$version is already published"
+            else
+              npm publish --access public "$directory"
+            fi
+          }
+
           for package in dist/platforms/*; do
-            npm publish --access public "$package"
+            publish "$package"
           done
-          npm publish --access public dist/ralon
+          publish dist/ralon
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

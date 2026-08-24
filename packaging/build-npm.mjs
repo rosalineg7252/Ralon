@@ -25,6 +25,10 @@ const version = argument("version").replace(/^v/, "");
 const binaries = argument("binaries", "artifacts");
 const out = argument("out", "dist");
 const allowMissing = process.argv.includes("--allow-missing");
+// Rebuilds only the package users install, listing every platform whether or
+// not its binary is to hand. For finishing a release where the platform
+// packages published and this one did not.
+const metaOnly = process.argv.includes("--meta-only");
 
 if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`--version ${version} is not a semver version`);
@@ -35,6 +39,12 @@ const meta = JSON.parse(readFileSync(join(root, "npm/package.json"), "utf8"));
 
 const optionalDependencies = {};
 for (const [target, spec] of Object.entries(targets)) {
+  const name = `@stoneware-dev/${spec.npm}`;
+  if (metaOnly) {
+    optionalDependencies[name] = version;
+    continue;
+  }
+
   const executable = spec.os === "win32" ? "ralon.exe" : "ralon";
   const source = join(binaries, target, executable);
 
@@ -46,7 +56,6 @@ for (const [target, spec] of Object.entries(targets)) {
     continue;
   }
 
-  const name = `@stoneware-dev/${spec.npm}`;
   const directory = join(out, "platforms", spec.npm);
   mkdirSync(join(directory, "bin"), { recursive: true });
   copyFileSync(source, join(directory, "bin", executable));
