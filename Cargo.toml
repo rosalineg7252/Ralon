@@ -2,7 +2,7 @@
 # The policy file stays `agent.lock`: it is the format, and `ralon` is one tool
 # that enforces it. Every descriptive name in this space was taken.
 name = "ralon"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 rust-version = "1.79"
 description = "Filesystem policy for AI coding agents: kernel-enforced write protection driven by an agent.lock file"
@@ -33,6 +33,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 globset = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
 serde_yaml_ng = "0.10"
 walkdir = "2"
 

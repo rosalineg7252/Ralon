@@ -83,6 +83,15 @@ write returns `EPERM`.
 
 ## Known limitations
 
+**A hard link made before the sandbox starts bypasses both backends.** A
+protected file with a second name is reachable through that name: it is an
+ordinary file, not bind-mounted and not carved out of the Landlock grant, and
+writing it changes the protected file's contents. Verified — a write through
+the second name changed `.env` from inside the sandbox. `status` and `run` warn
+when a protected file has more than one link, which is the only notice anyone
+gets, since nothing about the enforcement can prevent it. (Links created
+*inside* the sandbox are still refused: see "Why it cannot be undone".)
+
 **A second path to the same directory bypasses both backends.** This is tested
 and true: if the project is also visible at another mount point — a bind mount
 made before the sandbox started, a volume mounted twice into a container, a
@@ -113,6 +122,57 @@ the agent after adding files that need protecting.
 
 **Landlock's create-restriction is a functional cost, not a security one.** See
 `architecture.md`. It is why `mount` is the default.
+
+## Windows
+
+`run` enforces on Windows through exclusive share-mode handles: Ralon holds
+every protected file open allowing readers and refusing writers, so any attempt
+to write, delete, rename, or replace one fails with a sharing violation. The
+crucial property is that this binds **processes, not agents** — the blocked
+process does not have to know what Ralon is, so it covers every agent equally,
+including ones with no hook support at all.
+
+ACLs were the obvious alternative and are the wrong tool: an agent runs as the
+same user, so any permission Ralon can set it can unset. A handle is not a
+permission and cannot be argued with.
+
+Verified on Windows — overwrite, append, delete, rename away, replace by copy,
+replace by move, rename the parent directory, write inside a protected
+directory, remove the protected tree, rewrite the policy, and clear the
+read-only attribute then write. All refused; ordinary edits elsewhere
+unaffected.
+
+Two limits, both specific to this backend:
+
+- **A new file inside a protected directory is not covered.** Existing files
+  are locked individually and the directory cannot be renamed or removed, but
+  creating a new entry inside it succeeds. Tested, and true.
+- **Protection lasts as long as `run` does.** There is no inheritable
+  restriction to hand over, so Ralon supervises rather than `exec`ing. An agent
+  could kill its supervisor, so the command is placed in a job object that dies
+  with Ralon — killing Ralon kills the command with it, tested — but an agent
+  started outside `ralon run` is unrestricted, as on every platform.
+
+## Where there is no enforcement at all
+
+On Windows and macOS there is no backend yet, so `run` refuses to start. That
+refusal is the honest answer, but it leaves an agent started any other way
+completely unrestricted — which is the situation most people are actually in.
+
+`ralon hook install` writes a refusal into the agent's own configuration. Be
+precise about what that buys:
+
+- It covers the agent's **file-editing tools**, and refuses before the write.
+- It does **not** cover a shell command the agent runs. A hook cannot tell
+  which paths `sed -i` will touch, so `Bash` is deliberately not matched rather
+  than matched badly.
+- It lives in a file inside the project. An agent that can edit it can remove
+  it — unless `agent.lock` protects that file too, which on a platform with no
+  enforcement is itself only a hook away from being edited.
+
+So it is a courtesy, not a guarantee, and the honest recommendation on those
+platforms is to run the agent under Linux — WSL is enough — where the kernel
+does the refusing.
 
 ## Verifying it yourself
 

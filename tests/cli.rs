@@ -42,6 +42,11 @@ impl Project {
             .arg("--dir")
             .arg(&self.root)
             .args(arguments)
+            // `run` hands the command the working directory it was given, so a
+            // test that leaves this at the harness's cwd is testing the repo,
+            // not the project — which is how the first version of the Windows
+            // test passed while protecting nothing.
+            .current_dir(&self.root)
             .output()
             .expect("failed to run ralon")
     }
@@ -223,9 +228,57 @@ fn status_lists_backends() {
     assert!(text.contains("version    1"), "{text}");
 }
 
+/// Windows enforcement, for real: the protected file is held open, so anything
+/// that tries to write it gets a sharing violation. This is the counterpart of
+/// `tests/enforcement.rs`, which can only run on Linux.
 #[test]
-fn run_off_linux_refuses_rather_than_running_unprotected() {
-    if cfg!(target_os = "linux") {
+#[cfg(windows)]
+fn windows_locks_stop_a_write_from_any_process() {
+    let project = Project::new(Some(POLICY));
+    let secret = project.write(".env", "SECRET=original\n");
+    project.write("src/App.tsx", "writable\n");
+
+    // cmd.exe is not an agent and has never heard of a policy — which is the
+    // point. The backend blocks processes, not tools that opted in.
+    let blocked = project.run(&["run", "--quiet", "--", "cmd", "/c", "echo hacked > .env"]);
+    assert_ne!(code(&blocked), 0, "the write should have failed");
+    assert_eq!(
+        fs::read_to_string(&secret).unwrap(),
+        "SECRET=original\n",
+        "a protected file was modified"
+    );
+
+    // Deleting needs FILE_SHARE_DELETE, which the lock does not grant. `del`
+    // reports success even when it failed, so the file on disk is the only
+    // thing worth asserting on.
+    project.run(&["run", "--quiet", "--", "cmd", "/c", "del /q .env"]);
+    assert!(secret.is_file(), "a protected file was deleted");
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "SECRET=original\n");
+
+    // Renaming it away is the same operation to Windows, and equally refused.
+    project.run(&["run", "--quiet", "--", "cmd", "/c", "ren .env moved.txt"]);
+    assert!(secret.is_file(), "a protected file was renamed away");
+
+    // And ordinary work still goes through, or the backend is useless.
+    let allowed = project.run(&[
+        "run",
+        "--quiet",
+        "--",
+        "cmd",
+        "/c",
+        "echo edited > src\\App.tsx",
+    ]);
+    assert_eq!(code(&allowed), 0, "{}", stderr(&allowed));
+    assert!(fs::read_to_string(project.root.join("src/App.tsx"))
+        .unwrap()
+        .contains("edited"));
+}
+
+#[test]
+fn run_refuses_rather_than_running_unprotected_where_it_cannot_enforce() {
+    // Every platform with a backend enforces instead; this is about the ones
+    // without, which must never start the command.
+    if cfg!(target_os = "linux") || cfg!(windows) {
         return;
     }
     let project = Project::new(Some(POLICY));
@@ -241,12 +294,86 @@ fn run_off_linux_refuses_rather_than_running_unprotected() {
     ]);
 
     assert_eq!(code(&output), 2, "{}", stdout(&output));
+    let explanation = stderr(&output);
+    // The refusal has to say what is missing *and* what to do instead, or the
+    // reader concludes the policy is protecting them when nothing is.
     assert!(
-        stderr(&output).contains("Linux-only"),
-        "{}",
-        stderr(&output)
+        explanation.contains("no enforcement backend is available"),
+        "{explanation}"
     );
+    assert!(explanation.contains("hook install"), "{explanation}");
     assert!(!marker.exists(), "the command must not have run");
+}
+
+#[test]
+fn hook_install_writes_a_hook_that_refuses_protected_paths() {
+    let project = Project::new(Some(POLICY));
+
+    let installed = project.run(&["hook", "install"]);
+    assert_eq!(code(&installed), 0, "{}", stderr(&installed));
+
+    let settings = fs::read_to_string(project.root.join(".claude/settings.json")).unwrap();
+    assert!(settings.contains("ralon hook check"), "{settings}");
+    assert!(settings.contains("PreToolUse"), "{settings}");
+    // Bash is deliberately not matched: a hook cannot tell which paths a shell
+    // command touches, and claiming otherwise would be worse than the gap.
+    assert!(!settings.contains("Bash"), "{settings}");
+}
+
+#[test]
+fn the_installed_hook_denies_and_allows_the_right_paths() {
+    let project = Project::new(Some(POLICY));
+
+    for (relative, expected_deny) in [(".env", true), ("src/App.tsx", false)] {
+        let request = format!(
+            r#"{{"tool_name":"Write","tool_input":{{"file_path":{}}}}}"#,
+            serde_json_string(&project.root.join(relative).to_string_lossy()),
+        );
+
+        let mut child = Command::new(BINARY)
+            .arg("--dir")
+            .arg(&project.root)
+            .args(["hook", "check"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(request.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        let text = stdout(&output);
+        // Exit 2 is what every supported agent reads as "blocked". The JSON
+        // carries the reason for the ones that show it to the model, and it
+        // carries both spellings — Claude reads one, Cursor the other.
+        assert_eq!(
+            code(&output),
+            if expected_deny { 2 } else { 0 },
+            "{relative}: {text}{}",
+            stderr(&output)
+        );
+        assert_eq!(
+            text.contains("\"permission\":\"deny\""),
+            expected_deny,
+            "Cursor's key is missing: {text}"
+        );
+        assert_eq!(
+            text.contains("\"permissionDecision\":\"deny\""),
+            expected_deny,
+            "{relative} produced: {text}"
+        );
+    }
+}
+
+/// Minimal JSON string escaping, so the test needs no dependency.
+fn serde_json_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 #[test]

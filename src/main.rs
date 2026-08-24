@@ -1,9 +1,11 @@
 //! Ralon — `agent.lock` declares what AI agents may not modify, and this
 //! binary makes the kernel agree.
 
+mod audit;
 mod cli;
 mod commands;
 mod enforce;
+mod hook;
 mod matcher;
 mod policy;
 mod scan;
@@ -13,7 +15,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, HookAction};
 
 /// Something went wrong; nothing was enforced.
 const ERROR: u8 = 2;
@@ -51,6 +53,12 @@ fn dispatch() -> Result<ExitCode> {
         Command::Init { force } => commands::init(&directory, force),
         Command::Check { paths } => commands::check(&directory, &paths),
         Command::Status => commands::status(&directory),
+        Command::Hook { action } => match action {
+            HookAction::Install { agent, dry_run } => {
+                commands::hook_install(&directory, agent, dry_run)
+            }
+            HookAction::Check => commands::hook_check(&directory),
+        },
         Command::Run {
             backend,
             dry_run,

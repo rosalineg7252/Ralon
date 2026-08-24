@@ -1,69 +1,27 @@
-//! Linux enforcement backends.
+//! Read-only bind mounts in a locked namespace.
 //!
-//! Both backends restrict the *current* process and then `exec` the target
-//! command: Landlock domains and namespaces are inherited across `exec` and by
-//! every descendant, and neither can be dropped once entered. There is no
-//! supervisor process to bypass or kill.
+//! Precise, in the sense that only the paths the policy names behave
+//! differently. The privileges to mount, and a mount tree the host never sees,
+//! both come from the user namespace this enters.
 
-use std::ffi::{CString, OsString};
+use std::ffi::CString;
 use std::io;
 use std::mem;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::ptr;
 
-use anyhow::{anyhow, bail, Context, Result};
-use landlock::{
-    path_beneath_rules, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, ABI,
-};
+use anyhow::{Context, Result};
 
-use super::carve::Carve;
-use super::{Availability, Backend, Plan};
+use super::sys::{check, cstring, probe};
+use crate::enforce::Availability;
 
-/// The last Landlock ABI whose write set means exactly "modify a file". Later
-/// ABIs add device ioctls (v5) and unix socket connects (v9), which a policy
-/// about file contents has no business denying. Older kernels are handled by
-/// `CompatLevel::BestEffort`.
-const LANDLOCK_ABI: ABI = ABI::V3;
-
-pub fn enforce_and_exec(plan: &Plan, command: &[OsString]) -> anyhow::Error {
-    let applied = match plan.backend {
-        Backend::Mount => apply_mount(&plan.pinned, &plan.protected),
-        Backend::Landlock => match &plan.carve {
-            Some(carve) => apply_landlock(carve),
-            None => Err(anyhow!("internal error: landlock plan was not built")),
-        },
-        Backend::Auto => Err(anyhow!("internal error: backend was not resolved")),
-    };
-    if let Err(error) = applied {
-        return error;
-    }
-    exec(command)
-}
-
-/// Replaces this process with `command`.
-fn exec(command: &[OsString]) -> anyhow::Error {
-    let Some((program, arguments)) = command.split_first() else {
-        return anyhow!("no command given");
-    };
-    let error = Command::new(program).args(arguments).exec();
-    anyhow::Error::new(error).context(format!("failed to run `{}`", program.to_string_lossy()))
-}
-
-// ---------------------------------------------------------------------------
-// mount backend
-// ---------------------------------------------------------------------------
-
-pub fn mount_availability() -> Availability {
+pub fn availability() -> Availability {
     // Enforcement needs *two* nested user namespaces: one to mount in, and a
     // second one to lock those mounts. A host can allow the first and refuse
     // the second, so probing only the first would advertise a backend that
     // fails halfway through, after the policy was reported as enforced. Do
-    // exactly what `apply_mount` does instead — in a child process, so the
-    // probe cannot affect this one.
+    // exactly what `apply` does instead — in a child process, so the probe
+    // cannot affect this one.
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     match probe(|| {
@@ -79,7 +37,7 @@ pub fn mount_availability() -> Availability {
     }
 }
 
-fn apply_mount(pinned: &[PathBuf], protected: &[PathBuf]) -> Result<()> {
+pub fn apply(pinned: &[PathBuf], protected: &[PathBuf]) -> Result<()> {
     if protected.is_empty() {
         return Ok(());
     }
@@ -250,110 +208,4 @@ fn locked_flags(target: &CString) -> Result<libc::c_ulong> {
             flags
         }
     }))
-}
-
-// ---------------------------------------------------------------------------
-// landlock backend
-// ---------------------------------------------------------------------------
-
-pub fn landlock_availability() -> Availability {
-    match landlock_abi() {
-        Some(abi) if abi >= 2 => Availability::Available {
-            detail: format!("kernel ABI v{abi}"),
-        },
-        Some(abi) => Availability::Available {
-            detail: format!("kernel ABI v{abi}, no cross-directory renames"),
-        },
-        None => Availability::Unavailable {
-            reason: "the kernel reports no Landlock support (needs Linux 5.13+ with landlock \
-                     enabled, e.g. lsm=landlock,... on the kernel command line)"
-                .to_string(),
-        },
-    }
-}
-
-fn landlock_abi() -> Option<i64> {
-    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
-    let version = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            ptr::null::<libc::c_void>(),
-            0usize,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        )
-    };
-    (version > 0).then_some(version)
-}
-
-fn apply_landlock(carve: &Carve) -> Result<()> {
-    if carve.restricted.is_empty() {
-        return Ok(());
-    }
-
-    let access = AccessFs::from_write(LANDLOCK_ABI);
-    let status = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
-        .handle_access(access)?
-        .create()?
-        .no_new_privs(true)
-        .add_rules(path_beneath_rules(&carve.granted, access))?
-        .restrict_self()?;
-
-    match status.ruleset {
-        RulesetStatus::FullyEnforced => Ok(()),
-        RulesetStatus::PartiallyEnforced => {
-            eprintln!(
-                "ralon: warning: this kernel supports only part of the policy; \
-                 run `ralon status` for details"
-            );
-            Ok(())
-        }
-        RulesetStatus::NotEnforced => {
-            bail!("the kernel accepted no part of the policy — nothing is protected")
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// helpers
-// ---------------------------------------------------------------------------
-
-fn cstring(path: &Path) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("path contains a null byte: {}", path.display()))
-}
-
-fn check(result: libc::c_int) -> io::Result<()> {
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-/// Runs `action` in a forked child and reports its errno.
-///
-/// The child only sets up namespaces for itself and exits, so nothing it does
-/// is visible here. This assumes a single-threaded caller, which the binary is.
-fn probe(action: impl Fn() -> io::Result<()>) -> io::Result<()> {
-    match unsafe { libc::fork() } {
-        -1 => Err(io::Error::last_os_error()),
-        0 => {
-            let errno = match action() {
-                Ok(()) => 0,
-                Err(error) => error.raw_os_error().unwrap_or(1),
-            };
-            unsafe { libc::_exit(errno.clamp(0, 126)) }
-        }
-        child => {
-            let mut status = 0;
-            if unsafe { libc::waitpid(child, &mut status, 0) } == -1 {
-                return Err(io::Error::last_os_error());
-            }
-            match libc::WEXITSTATUS(status) {
-                0 => Ok(()),
-                errno => Err(io::Error::from_raw_os_error(errno)),
-            }
-        }
-    }
 }

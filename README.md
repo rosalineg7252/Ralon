@@ -51,13 +51,18 @@ The command is `ralon` however you install it. The policy file is called
 `agent.lock`, not `ralon.lock`, on purpose: it is a format, not a product.
 Anything could enforce it — this is one thing that does.
 
-The `run` command needs Linux. `init`, `check` and `status` work everywhere, so
-policies stay checkable in CI and on a laptop of any kind.
+`run` enforces on **Linux** (mount namespaces, Landlock) and on **Windows**
+(exclusive file handles). All three block *processes*, so they cover every
+agent — including ones that have never heard of Ralon. **macOS** has no backend
+yet; there `init`, `check`, `status` and `hook install` still work, and the
+hook is a courtesy layer rather than enforcement. `ralon status` says which of
+the two you are getting.
 
 ## Use
 
 ```console
 $ ralon init                   # write a starter agent.lock
+$ ralon hook install           # refuse the agent's edit tools (works everywhere)
 $ ralon status                 # what is protected, and what this kernel can enforce
 $ ralon check src/auth.ts      # is this path protected? exits 1 if it is
 $ ralon check                  # list everything the policy protects right now
@@ -69,25 +74,31 @@ $ ralon run -- claude          # the real thing
 terminal, its exit code, and its signals. There is no supervisor process to kill
 and nothing to keep running in the background.
 
-### As a pre-write hook
+### The hook
 
-`check` exits 1 when a path is protected, which is enough for any agent that
-supports hooks. For Claude Code, in `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Write|Edit",
-      "hooks": [{ "type": "command", "command": "ralon check \"$CLAUDE_FILE_PATH\" >/dev/null || exit 2" }]
-    }]
-  }
-}
+```console
+$ ralon hook install
 ```
 
-That is a courtesy, not a defence: it produces a clear error instead of a
-confusing `EACCES`. The kernel is what actually stops the write, and it stops
-`sed -i`, `python`, and `git checkout` too.
+That writes a refusal into the configuration of **Claude Code**, **Cursor** and
+**OpenCode**, so those agents are turned away before they edit a protected
+path. `--agent` picks one. It works on every platform, including the ones where
+`run` cannot enforce anything — which is exactly where it matters most.
+
+For every other agent — Codex, Antigravity, GLM, Gemini, whatever ships next
+month — use `ralon run`. It restricts the *process*, so it never needed to know
+which agent it was running in the first place. Agents are only listed here
+because a hook has to speak each one's configuration format, and only these
+three document a hook that can refuse an edit before it happens.
+
+Be clear about what it is worth. It covers the agent's **edit tools**; it does
+not cover a shell command the agent runs, because a hook cannot tell which
+paths `sed -i` will touch. On Linux the kernel catches those anyway. Elsewhere
+they get through, which is why the hook is a courtesy and `run` is the
+guarantee.
+
+`ralon check` exits 1 for a protected path if you would rather wire it up
+yourself, or gate a CI job on it.
 
 ## The policy file
 
@@ -147,8 +158,16 @@ command starts, so `umount` and bind-mount tricks fail from inside.
 
 ## Backends
 
-`run` picks the strongest backend the kernel offers. `ralon status` shows
-what is available, and `--backend mount|landlock` pins the choice.
+`run` picks the strongest backend the platform offers. `ralon status` shows
+what is available, and `--backend mount|landlock|locks` pins the choice.
+
+**locks** (Windows) — Ralon holds every protected file open allowing readers
+and refusing writers, so writing, deleting, renaming or replacing one fails
+with a sharing violation, for every process on the machine. ACLs would not do:
+an agent runs as the same user, so any permission Ralon can set it can unset.
+Two limits: a *new* file created inside a protected directory is not covered,
+and the protection lasts as long as `run` does — the command is tied to a job
+object that dies with Ralon, so it cannot outlive the locks.
 
 **mount** (default) — read-only bind mounts inside a user + mount namespace,
 locked by entering a second namespace so they cannot be undone. Every parent

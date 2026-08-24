@@ -1,9 +1,25 @@
 //! Turning a policy into an enforced sandbox.
 
+// Planning is platform-independent on purpose: `--dry-run` shows the same plan
+// on a laptop that cannot enforce it as on the machine that will. Only the
+// syscalls live per platform, one directory each.
 pub mod carve;
 
 #[cfg(target_os = "linux")]
-pub mod linux;
+#[path = "linux/mod.rs"]
+mod platform;
+
+#[cfg(target_os = "macos")]
+#[path = "macos/mod.rs"]
+mod platform;
+
+#[cfg(target_os = "windows")]
+#[path = "windows/mod.rs"]
+mod platform;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[path = "other.rs"]
+mod platform;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,6 +38,10 @@ pub enum Backend {
     /// this file", so directories leading to a protected path become
     /// create-restricted.
     Landlock,
+    /// Windows: exclusive share-mode handles held for the life of the command.
+    /// Blocks every process rather than every agent, and lasts exactly as long
+    /// as `run` does.
+    Locks,
 }
 
 impl fmt::Display for Backend {
@@ -30,6 +50,7 @@ impl fmt::Display for Backend {
             Backend::Auto => "auto",
             Backend::Mount => "mount",
             Backend::Landlock => "landlock",
+            Backend::Locks => "locks",
         };
         // pad, not write_str, so `{backend:<9}` lines up in tables
         f.pad(name)
@@ -76,8 +97,10 @@ impl Plan {
     pub fn build(backend: Backend, root: &Path, protected: Vec<PathBuf>) -> Plan {
         let carve =
             (backend == Backend::Landlock).then(|| carve::plan(&protected, &carve::read_dir));
+        // Both of these protect the *path* as well as the contents, so both
+        // need the directories leading to it.
         let pinned = match backend {
-            Backend::Mount => pinned_directories(root, &protected),
+            Backend::Mount | Backend::Locks => pinned_directories(root, &protected),
             _ => Vec::new(),
         };
         Plan {
@@ -114,29 +137,9 @@ pub fn pinned_directories(root: &Path, protected: &[PathBuf]) -> Vec<PathBuf> {
     pinned.into_iter().collect()
 }
 
-#[cfg(target_os = "linux")]
+/// What this machine can actually enforce with.
 pub fn availability() -> Vec<(Backend, Availability)> {
-    vec![
-        (Backend::Mount, linux::mount_availability()),
-        (Backend::Landlock, linux::landlock_availability()),
-    ]
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn availability() -> Vec<(Backend, Availability)> {
-    let reason = format!(
-        "kernel enforcement is Linux-only, this is {}",
-        std::env::consts::OS
-    );
-    vec![
-        (
-            Backend::Mount,
-            Availability::Unavailable {
-                reason: reason.clone(),
-            },
-        ),
-        (Backend::Landlock, Availability::Unavailable { reason }),
-    ]
+    platform::availability()
 }
 
 /// Resolves `Backend::Auto` against what the kernel actually offers.
@@ -154,7 +157,7 @@ pub fn resolve(requested: Backend) -> Result<Backend> {
         Backend::Auto => {
             // Mount first: it protects exactly what the policy names and leaves
             // everything else alone.
-            for backend in [Backend::Mount, Backend::Landlock] {
+            for backend in [Backend::Mount, Backend::Landlock, Backend::Locks] {
                 if find(backend).is_available() {
                     return Ok(backend);
                 }
@@ -163,7 +166,12 @@ pub fn resolve(requested: Backend) -> Result<Backend> {
                 .iter()
                 .map(|(backend, status)| format!("\n  {backend:<9} {status}"))
                 .collect::<String>();
-            anyhow::bail!("no enforcement backend is available:{reasons}")
+            anyhow::bail!(
+                "no enforcement backend is available:{reasons}\n\n\
+                 Nothing here can stop an agent from writing to the protected paths.\n\
+                 `ralon hook install` refuses an agent's own edit tools; running the\n\
+                 agent under WSL or Linux is the only enforcement."
+            )
         }
         backend => match find(backend) {
             Availability::Available { .. } => Ok(backend),
@@ -174,20 +182,18 @@ pub fn resolve(requested: Backend) -> Result<Backend> {
     }
 }
 
-/// Applies `plan` to the current process, then replaces it with `command`.
+/// Applies `plan`, then runs `command` under it.
 ///
-/// Returns only on failure: on success the process image is gone.
-#[cfg(target_os = "linux")]
-pub fn enforce_and_exec(plan: &Plan, command: &[std::ffi::OsString]) -> anyhow::Error {
-    linux::enforce_and_exec(plan, command)
-}
-
-#[cfg(not(target_os = "linux"))]
-pub fn enforce_and_exec(_plan: &Plan, _command: &[std::ffi::OsString]) -> anyhow::Error {
-    anyhow::anyhow!(
-        "kernel enforcement is Linux-only, this is {} (use --dry-run to inspect the plan)",
-        std::env::consts::OS
-    )
+/// Platforms differ in a way worth knowing rather than hiding. Linux replaces
+/// this process with the command, so the restriction is inherited and nothing
+/// survives to be bypassed — the `Ok` arm is unreachable there. Windows has no
+/// inheritable restriction to hand over, so it holds the locks itself and waits,
+/// and the protection lasts exactly as long as the command does.
+pub fn enforce_and_exec(
+    plan: &Plan,
+    command: &[std::ffi::OsString],
+) -> Result<std::process::ExitCode> {
+    platform::enforce_and_exec(plan, command)
 }
 
 #[cfg(test)]

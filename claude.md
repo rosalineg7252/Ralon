@@ -78,13 +78,21 @@ agent-independent. Do not rename the file after the tool.
       main.rs cli.rs commands.rs   CLI, one function per subcommand
       policy.rs                    parse + validate agent.lock
       matcher.rs scan.rs           patterns → globs → paths on disk
+      audit.rs                     conditions that weaken a policy
+      hook/mod.rs hook/claude.rs   the agent hook; one file per agent
       enforce/mod.rs               backend selection, Plan, ancestor pinning
       enforce/carve.rs             Landlock rule planning (pure, testable)
-      enforce/linux.rs             the syscalls (the only unsafe code)
+      enforce/linux/               mount.rs landlock.rs sys.rs — the syscalls
+      enforce/macos/ windows/      no backend yet; each documents its mechanism
     tests/cli.rs                   CLI behaviour, every platform
     tests/enforcement.rs           real bypass attempts, Linux only
 
-Commands: `ralon init | check | status | run`. `run` restricts the current
+Planning is platform-independent on purpose — `--dry-run` shows the same plan
+on a machine that cannot enforce it — so only syscalls live under a platform
+directory. A new platform is a new directory exposing `availability()` and
+`enforce_and_exec()`; a new agent is a new file in `hook/`.
+
+Commands: `ralon init | check | status | hook install | run`. `run` restricts the current
 process and then `execve`s the command, so the restriction is inherited by every
 descendant and there is no supervisor to bypass.
 
@@ -104,8 +112,9 @@ the tested limitations, `publishing.md` for release steps.
 
 ## Working on this repo
 
-- `run` only compiles on Linux. Everything else builds and is tested on Windows
-  and macOS too — keep it that way, `check`/`status` are used in mixed CI.
+- Everything compiles on every platform; only the syscalls are Linux-gated.
+  `check`, `status` and `hook install` are used in mixed CI — keep them working
+  there.
 - Enforcement changes must be verified on Linux, not reasoned about:
 
       docker run --rm --security-opt seccomp=unconfined \
@@ -117,6 +126,11 @@ the tested limitations, `publishing.md` for release steps.
 - A new bypass gets a failing test in `tests/enforcement.rs` first. The attack
   tables there are one line per attack and run against every available backend.
 - Never let a failure to enforce be silent. If no backend is available, `run`
-  refuses to start the command rather than running it unprotected.
+  refuses to start the command rather than running it unprotected — and says
+  what to do instead, because "unavailable" on its own lets the reader conclude
+  the policy is protecting them when nothing is.
+- Weaknesses enforcement cannot fix — a hard link to a protected file, a second
+  mount of the project — are reported by `audit.rs` before the agent starts.
+  A new one means a warning *and* an entry in `security.md`.
 - Policy semantics are the real API. A pattern that quietly stops protecting
   something is a breaking, security-relevant change.

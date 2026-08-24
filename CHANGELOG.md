@@ -4,6 +4,83 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## 0.1.4
+
+Ralon used to install cleanly on Windows and macOS, write a policy that looked
+authoritative, confirm the paths were `locked`, and then enforce nothing —
+while an agent edited those paths freely. Everything was behaving as designed
+and documented, which is exactly what made it dangerous: the tool implied a
+guarantee on platforms where it had none. This release closes that gap on
+Windows with real enforcement, and everywhere else by saying so plainly.
+
+### Added
+
+- **Windows now enforces.** `ralon run` holds every protected file open with a
+  share mode that allows readers and refuses writers, so writing, deleting,
+  renaming or replacing one fails with a sharing violation — for **every
+  process on the machine**, whichever agent it belongs to and whether or not
+  that agent supports hooks. Verified against the same attack battery the Linux
+  backends face: overwrite, append, delete, rename away, replace by copy or
+  move, rename the parent directory, write inside a protected directory, remove
+  the tree, rewrite the policy, and clear the read-only attribute first. All
+  refused; ordinary edits elsewhere unaffected.
+
+  ACLs were the obvious approach and are the wrong one: the agent runs as the
+  same user, so any permission Ralon can set it can unset. A handle is not a
+  permission.
+
+  Two limits, documented in `security.md` and both tested: a *new* file created
+  inside a protected directory is not covered, and the protection lasts only as
+  long as `run` — so the command is placed in a job object that dies with
+  Ralon, closing the "kill the supervisor and keep writing" hole.
+- **`ralon hook install`** — wires a refusal into an agent's own configuration
+  instead of leaving each user to hand-write JSON. Covers **Claude Code**
+  (`.claude/settings.json`), **Cursor** (`.cursor/hooks.json`) and **OpenCode**
+  (`.opencode/plugins/ralon.js`), all three by default, `--agent` to pick one.
+  Existing settings and unrelated hooks are preserved; a settings file that
+  cannot be parsed is never touched.
+- `ralon hook check` makes the decision for every agent: one JSON document
+  carrying both Claude's and Cursor's keys, plus exit code 2, which all three
+  read as "blocked". Paths are found under any of the spellings agents use
+  (`file_path`, `filePath`, `path`, …) at any depth, because one unrecognised
+  key is an edit waved through.
+- On Linux none of this is needed: `ralon run` restricts the *process*, so it
+  already covers Codex, Antigravity, GLM, Gemini and anything shipped next
+  year, hooks or no hooks.
+- **An audit that runs before the agent does.** `status` and `run` now report
+  conditions that weaken a policy without breaking it.
+
+### Security
+
+- **A pre-existing hard link to a protected file bypasses both backends.** The
+  other name is an ordinary file: not bind-mounted, not carved out of the
+  Landlock grant, and writing it changes the protected file. Verified against a
+  live kernel — a write through the second name changed `.env` inside the
+  sandbox. Ralon now warns when a protected file has more than one link. This
+  was previously undocumented.
+- **A second mount of the project bypasses both backends**, which
+  `security.md` already documented. Ralon now detects it by reading
+  `/proc/self/mountinfo` and names the other path.
+- `run` and `status` no longer report "unavailable" and stop there. They say
+  plainly that nothing is protecting those paths, and what to do instead.
+
+### Changed
+
+- Enforcement is split one directory per platform — `enforce/linux/{mount,
+  landlock,sys}`, `enforce/windows/{locks,job}`, `enforce/macos`,
+  `enforce/other` — with
+  planning left platform-independent so `--dry-run` shows the same plan
+  everywhere. macOS documents the mechanism it would use (Seatbelt) rather
+  than standing empty.
+- `enforce_and_exec` returns the command's exit status instead of only an
+  error. Linux still replaces the process and never returns; Windows has no
+  inheritable restriction to hand over, so it supervises and reports back.
+- The hook is one file per agent (`hook/{claude,cursor,opencode}.rs`), so
+  supporting another is a new file rather than an edit to the policy logic.
+  Codex, Antigravity, GLM and Gemini are not included: none of them documents a
+  hook that can refuse a file edit before it happens, and shipping a config
+  that silently does nothing would be worse than shipping none.
+
 ## 0.1.3
 
 ### Fixed
