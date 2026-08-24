@@ -87,7 +87,7 @@ $ vim Cargo.toml                       # version = "0.1.2"
 $ cargo build                          # refreshes Cargo.lock
 $ vim CHANGELOG.md                     # what changed; Security section if relevant
 
-# 2. prove it still enforces — Windows and macOS cannot tell you this
+# 2. prove it still enforces, on each platform that can prove anything
 $ cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 $ docker run --rm --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
     -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target \
@@ -103,10 +103,22 @@ $ git tag -a v0.1.2 -m "v0.1.2" && git push --tags
 # 5. check the release page, verify a checksum, then approve the run in Actions
 ```
 
-The Docker line is not optional. `cargo test` on macOS or Windows never touches
-an enforcement backend, so it cannot tell you whether the thing this project
-exists to do still works. `RALON_REQUIRE_BACKEND=1` turns "no backend
-available, nothing tested" from a pass into a failure.
+Each platform proves a different part, and none of them proves all of it:
+
+| Run on | Proves |
+| --- | --- |
+| Windows | the locks, the directory ACL, the guard (`tests/cli.rs`) |
+| Docker/Linux | the mount and Landlock attack tables (`tests/enforcement.rs`) |
+| **CI, macOS** | Seatbelt — **the only place it runs at all** |
+
+The Docker line is not optional: `cargo test` on Windows never touches a Linux
+backend, so it cannot tell you whether the oldest half of this project still
+works. `RALON_REQUIRE_BACKEND=1` turns "no backend available, nothing tested"
+from a pass into a failure.
+
+**macOS cannot be verified before the tag**, by anyone — there is no container
+for it. Push the release commit and let the macOS CI job go green *before*
+tagging. Tagging first means finding out from a user.
 
 Check `security.md` still describes reality before every release. Its
 limitations section is the honest part of the pitch and it ages faster than the
@@ -183,8 +195,17 @@ under which backend.
 - No `NOTICE` file, deliberately: Apache-2.0 §4(d) only binds redistributors
   when one exists. Adding one puts it in every downstream distribution — keep
   it to attribution, not release notes.
-- `rust-version = "1.79"` is a promise. CI pins stable, so either add a job on
-  1.79 or raise the field when you use something newer.
+- `rust-version` is a promise, and it is easy to break without touching a line
+  of code — a dependency raises *its* MSRV and yours moves with it. It said
+  `1.79` for several releases while the crate had not built on 1.79 for months
+  (`clap_lex` wants edition 2024, `globset` wants 1.88), so an older toolchain
+  failed with a dependency's error instead of a clear one. Check it the only
+  way that means anything:
+
+  ```console
+  $ docker run --rm -v "$PWD:/work" -w /work -e CARGO_TARGET_DIR=/tmp/target \
+      rust:1.88-bookworm cargo check --all-targets
+  ```
 - `exclude` keeps the release plumbing out of the crate tarball. Crate users
   get the tool and the documentation that explains its limits, not the npm
   wrapper.
@@ -274,4 +295,9 @@ Two reports matter, and they need opposite responses:
 - *"It did not block something it should have"* — a bypass. Treat it as a
   security issue: reproduce it as a test in `tests/enforcement.rs` first, fix
   second, and say plainly in the changelog what was exposed and in which
-  versions.
+  versions. Ask how they checked: an exit code proves nothing here, and the
+  report is only actionable once someone has read the file back.
+- *"A directory refuses new files and nothing is running"* (Windows) — a guard
+  that was killed rather than stopped, leaving its deny ACE behind. That is the
+  designed failure direction, not a bug. `ralon status` names it; `ralon guard
+  --stop` clears it.

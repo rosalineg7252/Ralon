@@ -1,5 +1,9 @@
 # Architecture
 
+The whole-system design, all three platforms, is in `DESIGN.md` — read that
+first. This document goes deeper on the two Linux backends, which are the
+oldest and the most intricate.
+
 ```
 agent.lock
     │  policy.rs      parse + validate (serde_yaml_ng)
@@ -13,8 +17,8 @@ Matcher
 [ProtectedPath]  ──────────────────► check / status print this and stop
     │  enforce/mod.rs canonicalize, pick a backend, build a Plan
     ▼
-Plan { backend, protected, pinned, carve }
-    │  enforce/linux.rs
+Plan { backend, protected, pinned, carve, profile }
+    │  enforce/linux/  (or macos/, windows/)
     ▼
 restrict this process ──► execve(command)
     │
@@ -24,7 +28,9 @@ the agent, and every process it will ever spawn
 
 Nothing runs after `execve`. There is no daemon, no wrapper process, no fd
 passed to the child. The restriction lives in the kernel, attached to the
-process, inherited by everything it forks.
+process, inherited by everything it forks. (Windows is the exception in both
+respects: it has no inheritable restriction, so `run` supervises, and `guard`
+is a process that deliberately stays alive. See `DESIGN.md` §3.)
 
 ## Modules
 
@@ -36,13 +42,21 @@ process, inherited by everything it forks.
 | `policy.rs` | parse and validate `agent.lock`, find the project root |
 | `matcher.rs` | patterns → `globset`, path matching |
 | `scan.rs` | resolve patterns against the filesystem |
+| `audit.rs` | conditions that weaken a policy without breaking it |
+| `hook/` | one file per agent, plus the shared decision |
 | `enforce/mod.rs` | backend selection, `Plan`, ancestor pinning |
 | `enforce/carve.rs` | Landlock rule planning (pure, filesystem injected) |
-| `enforce/linux.rs` | the syscalls: namespaces, mounts, Landlock |
+| `enforce/profile.rs` | Seatbelt profile text (pure, tested everywhere) |
+| `enforce/linux/` | `mount.rs`, `landlock.rs`, `sys.rs` |
+| `enforce/macos/` | `seatbelt.rs` — `sandbox_init`, and nothing else |
+| `enforce/windows/` | `locks.rs`, `acl.rs`, `job.rs`, `guard.rs` |
+| `enforce/unguarded.rs` | why a guard cannot work on this platform |
 
-`enforce/linux.rs` is the only `unsafe` code and the only file that cannot be
-compiled off Linux. Everything else builds and is tested on Windows and macOS
-too, which is what keeps `check` and `status` usable in mixed teams and in CI.
+The platform directories hold all the `unsafe` code and are the only files that
+do not compile everywhere. Everything else builds and is tested on all three
+platforms, which is what keeps `check`, `status` and `hook install` usable in
+mixed teams and in CI — and what lets `--dry-run` show the same plan on a
+machine that cannot enforce it.
 
 ## Policy semantics
 

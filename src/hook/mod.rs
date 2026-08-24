@@ -1,10 +1,16 @@
 //! The agent hook: refusing an edit before it happens.
 //!
-//! Enforcement lives in the kernel and only exists on Linux. Everywhere else —
-//! and for the window before `run` is adopted — the hook is what an agent
-//! actually runs into. It is deliberately modest: it can refuse an agent's own
-//! edit tools, and nothing else. An agent that shells out is not covered, which
-//! is why this is called a courtesy and not a guarantee.
+//! Enforcement lives in the kernel and covers processes. For the window before
+//! `run` or `guard` is adopted, the hook is what an agent actually runs into.
+//! It is deliberately modest: it refuses an agent's own edit tools, and nothing
+//! else. An agent that shells out is not covered, and an agent that can edit
+//! the project can delete the hook — which is why this is called a courtesy and
+//! never a guarantee.
+//!
+//! Nine agents document a hook that can refuse an edit; one file each, and one
+//! shared decision. They disagree about the settings file, the event name, the
+//! request shape and the word for "no", so the differences live in those files
+//! and everything below is common.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -15,24 +21,48 @@ use serde_json::{json, Map, Value};
 use crate::matcher::{relative_path, Matcher};
 use crate::policy::{self, Policy};
 
+pub mod antigravity;
 pub mod claude;
+pub mod cline;
+pub mod codex;
+pub mod copilot;
 pub mod cursor;
+pub mod gemini;
 pub mod opencode;
+pub mod windsurf;
 
 use crate::cli::Agent;
 
-/// Paths an agent might name in a request, at any depth. Agents disagree about
-/// the spelling and change it between versions, so the check looks for all of
-/// them rather than one per agent — a key we fail to recognise means an edit
-/// waved through, which is the failure that matters.
+/// Paths an agent might name in a request, at any depth.
+///
+/// Agents disagree about the spelling and change it between versions, so the
+/// check looks for all of them rather than one per agent — a key we fail to
+/// recognise means an edit waved through, which is the failure that matters.
+///
+/// Compared after lowercasing and dropping underscores, so one entry covers
+/// `file_path`, `filePath` and `FilePath` at once. They really do differ this
+/// much: Claude Code sends `file_path`, Antigravity sends PascalCase arguments,
+/// Gemini CLI sends snake_case ones.
 const PATH_KEYS: &[&str] = &[
-    "file_path",
-    "filePath",
+    "filepath",
     "path",
-    "notebook_path",
-    "target_file",
-    "abs_path",
+    "notebookpath",
+    "targetfile",
+    "abspath",
+    "absolutepath",
+    "oldpath",
+    "newpath",
+    "destination",
 ];
+
+fn is_path_key(key: &str) -> bool {
+    let normalised: String = key
+        .chars()
+        .filter(|character| *character != '_' && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    PATH_KEYS.contains(&normalised.as_str())
+}
 
 /// Every path named anywhere in the request.
 fn targets(request: &Value) -> Vec<String> {
@@ -41,11 +71,57 @@ fn targets(request: &Value) -> Vec<String> {
     found
 }
 
+/// Tools that only look at a file.
+///
+/// Some agents attach a matcher to the hook and only call it for edits; others
+/// — GitHub Copilot among them — call it for *every* tool and expect the hook
+/// to decide. Without this, a hook installed for one of those would refuse an
+/// agent permission to **read** a protected file, which contradicts the whole
+/// design: `agent.lock` says what must not change, and an agent is meant to be
+/// able to read the policy that governs it.
+///
+/// Matched loosely and on the recognised side only. An unfamiliar tool name is
+/// treated as a write, because the two mistakes are not equal: refusing a read
+/// is an annoyance the user sees immediately, and allowing a write is the
+/// failure this whole program exists to prevent.
+const READ_ONLY_TOOLS: &[&str] = &[
+    "read", "view", "open", "cat", "grep", "search", "glob", "list", "ls", "find", "fetch",
+];
+
+/// The tool being called, wherever this agent puts it.
+fn tool_name(request: &Value) -> Option<&str> {
+    request
+        .get("tool_name")
+        .or_else(|| request.get("toolName"))
+        .or_else(|| request.get("tool"))
+        // Antigravity nests it: `{"toolCall": {"name": ..., "args": {...}}}`.
+        .or_else(|| request.get("toolCall").and_then(|call| call.get("name")))
+        .and_then(Value::as_str)
+}
+
+fn only_reads(request: &Value) -> bool {
+    let Some(tool) = tool_name(request) else {
+        // No tool named: this is an agent whose hook is already scoped to edits
+        // by a matcher, so there is nothing to narrow.
+        return false;
+    };
+    let tool = tool.to_lowercase();
+
+    // "read" matches `Read`, `read_file`, `ReadFile`; "edit" is never a read,
+    // and neither is `NotebookEditRead`-style compounding, so a name that also
+    // contains a writing verb loses.
+    let writes = [
+        "write", "edit", "create", "replace", "patch", "insert", "delete", "remove",
+    ];
+    READ_ONLY_TOOLS.iter().any(|name| tool.contains(name))
+        && !writes.iter().any(|name| tool.contains(name))
+}
+
 fn collect(value: &Value, found: &mut Vec<String>) {
     match value {
         Value::Object(fields) => {
             for (key, child) in fields {
-                if PATH_KEYS.contains(&key.as_str()) {
+                if is_path_key(key) {
                     if let Some(path) = child.as_str() {
                         found.push(path.to_string());
                     }
@@ -74,17 +150,86 @@ pub fn install_for(root: &Path, agent: Agent, dry_run: bool) -> Result<Vec<Insta
         Agent::Claude => Ok(vec![install(root, dry_run)?]),
         Agent::Cursor => Ok(vec![cursor::install(root, dry_run)?]),
         Agent::Opencode => Ok(vec![opencode::install(root, dry_run)?]),
+        Agent::Copilot => Ok(vec![copilot::install(root, dry_run)?]),
+        Agent::Codex => Ok(vec![install_codex(root, dry_run)?]),
+        Agent::Gemini => Ok(vec![install_gemini(root, dry_run)?]),
+        Agent::Antigravity => Ok(vec![antigravity::install(root, dry_run)?]),
+        Agent::Windsurf => Ok(vec![install_windsurf(root, dry_run)?]),
+        Agent::Cline => Ok(vec![cline::install(root, dry_run)?]),
         Agent::All => Ok(vec![
             install(root, dry_run)?,
             cursor::install(root, dry_run)?,
             opencode::install(root, dry_run)?,
+            copilot::install(root, dry_run)?,
+            install_codex(root, dry_run)?,
+            install_gemini(root, dry_run)?,
+            antigravity::install(root, dry_run)?,
+            install_windsurf(root, dry_run)?,
+            cline::install(root, dry_run)?,
         ]),
     }
 }
 
+fn install_windsurf(root: &Path, dry_run: bool) -> Result<Installed> {
+    install_settings(
+        root,
+        dry_run,
+        windsurf::SETTINGS,
+        windsurf::EVENT,
+        windsurf::entry(),
+        windsurf::is_ours,
+    )
+}
+
+fn install_codex(root: &Path, dry_run: bool) -> Result<Installed> {
+    install_settings(
+        root,
+        dry_run,
+        codex::SETTINGS,
+        codex::EVENT,
+        codex::entry(),
+        codex::is_ours,
+    )
+}
+
+fn install_gemini(root: &Path, dry_run: bool) -> Result<Installed> {
+    install_settings(
+        root,
+        dry_run,
+        gemini::SETTINGS,
+        gemini::EVENT,
+        gemini::entry(),
+        gemini::is_ours,
+    )
+}
+
 /// Adds the hook to Claude Code's settings, preserving everything already there.
 pub fn install(root: &Path, dry_run: bool) -> Result<Installed> {
-    let path = root.join(claude::SETTINGS);
+    install_settings(
+        root,
+        dry_run,
+        claude::SETTINGS,
+        claude::EVENT,
+        claude::entry(),
+        claude::is_ours,
+    )
+}
+
+/// The shape Claude Code, Codex and Gemini CLI all share: a settings file with
+/// a `hooks` object, an array per event, and one entry of ours among whatever
+/// else is already there.
+///
+/// Only the file, the event name, and the entry differ between them — which is
+/// the argument for one function rather than three copies drifting apart.
+fn install_settings(
+    root: &Path,
+    dry_run: bool,
+    settings_file: &str,
+    event: &str,
+    entry: Value,
+    is_ours: fn(&Value) -> bool,
+) -> Result<Installed> {
+    let path = root.join(settings_file);
 
     let mut settings: Value = if path.is_file() {
         let text = std::fs::read_to_string(&path)
@@ -117,23 +262,19 @@ pub fn install(root: &Path, dry_run: bool) -> Result<Installed> {
     let pre = events
         .as_object_mut()
         .expect("checked above")
-        .entry(claude::EVENT)
+        .entry(event.to_string())
         .or_insert_with(|| Value::Array(Vec::new()));
     let Some(list) = pre.as_array_mut() else {
-        anyhow::bail!(
-            "{}: `hooks.{}` is not an array",
-            path.display(),
-            claude::EVENT
-        );
+        anyhow::bail!("{}: `hooks.{}` is not an array", path.display(), event);
     };
 
     // Replace our own entry rather than stacking duplicates; leave every other
     // hook exactly where it was.
-    let existing = list.iter().position(claude::is_ours);
+    let existing = list.iter().position(is_ours);
     let replaced = existing.is_some();
     match existing {
-        Some(index) => list[index] = claude::entry(),
-        None => list.push(claude::entry()),
+        Some(index) => list[index] = entry,
+        None => list.push(entry),
     }
 
     let rendered = format!("{}\n", serde_json::to_string_pretty(&settings)?);
@@ -162,16 +303,31 @@ pub enum Decision {
 impl Decision {
     /// One refusal that every supported agent understands.
     ///
-    /// Claude Code reads `hookSpecificOutput.permissionDecision`; Cursor reads
-    /// `permission` and `agent_message`. They are different keys in the same
-    /// object, so one document satisfies both, and OpenCode's plugin only looks
-    /// at the exit code. That is why there is one `hook check` rather than one
-    /// per agent.
+    /// Seven agents, four spellings of "no", one JSON document — they are
+    /// different keys in the same object, so nothing has to choose between
+    /// them:
+    ///
+    /// - `hookSpecificOutput.permissionDecision` — Claude Code, GitHub Copilot,
+    ///   Codex.
+    /// - `decision` + `reason` — Antigravity and Gemini CLI.
+    /// - `permission` + `agent_message` — Cursor.
+    /// - `cancel` + `errorMessage` — Cline.
+    /// - exit code 2 — OpenCode's plugin, Windsurf, and Codex's fallback.
+    ///
+    /// Emitting a key an agent does not know costs nothing; failing to emit one
+    /// it needs is an edit waved through. So this errs towards saying it in
+    /// every dialect at once, which is also why there is one `hook check`
+    /// rather than one per agent.
     pub fn render(&self) -> Option<String> {
         match self {
             Decision::Allow => None,
             Decision::Deny { reason } => Some(
                 json!({
+                    "decision": "deny",
+                    "reason": reason,
+                    "systemMessage": format!("ralon: {reason}"),
+                    "cancel": true,
+                    "errorMessage": reason,
                     "permission": "deny",
                     "agent_message": reason,
                     "user_message": format!("ralon: {reason}"),
@@ -202,6 +358,12 @@ pub fn decide(request: &str, start: &Path) -> Result<Decision> {
         // edit because a payload changed shape would make the agent unusable.
         return Ok(Decision::Allow);
     };
+
+    // Reading a protected file is allowed, always and everywhere. Only agents
+    // that call the hook for every tool ever reach this.
+    if only_reads(&value) {
+        return Ok(Decision::Allow);
+    }
 
     // A request naming several paths — a multi-edit — is refused if any one of
     // them is protected.
@@ -332,6 +494,118 @@ mod tests {
         for request in ["", "not json", "{}", r#"{"tool_input":{}}"#] {
             let decision = decide(request, dir.path()).unwrap();
             assert!(decision.render().is_none(), "blocked on `{request}`");
+        }
+    }
+
+    /// Agents that call the hook for *every* tool, not just edits, must still
+    /// be allowed to read a protected file. `agent.lock` governs what may
+    /// change; an agent that cannot read the policy cannot obey it.
+    #[test]
+    fn reading_a_protected_file_is_never_refused() {
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let target = dir.path().join(".env");
+
+        for tool in ["Read", "read_file", "view", "Glob", "grep_search"] {
+            let request = json!({
+                "tool_name": tool,
+                "tool_input": { "file_path": target.to_string_lossy() }
+            })
+            .to_string();
+            let decision = decide(&request, dir.path()).unwrap();
+            assert!(decision.render().is_none(), "{tool} was refused a read");
+        }
+
+        // And the writing tools still are refused, including ones whose names
+        // merely contain a reading word.
+        for tool in ["Write", "write_file", "apply_patch", "replace_file_content"] {
+            let request = json!({
+                "tool_name": tool,
+                "tool_input": { "file_path": target.to_string_lossy() }
+            })
+            .to_string();
+            let decision = decide(&request, dir.path()).unwrap();
+            assert!(decision.render().is_some(), "{tool} was allowed to write");
+        }
+    }
+
+    /// Agents spell the same argument four different ways. A spelling we fail
+    /// to recognise is an edit waved through.
+    #[test]
+    fn a_path_is_found_whatever_the_key_is_called() {
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let target = dir.path().join(".env").to_string_lossy().into_owned();
+
+        for key in [
+            "file_path",
+            "filePath",
+            "FilePath",
+            "TargetFile",
+            "AbsolutePath",
+            "abs_path",
+        ] {
+            let request =
+                json!({ "tool_name": "Write", "tool_input": { key: target } }).to_string();
+            let decision = decide(&request, dir.path()).unwrap();
+            assert!(decision.render().is_some(), "missed the path under `{key}`");
+        }
+    }
+
+    /// Antigravity nests the whole call: `{"toolCall": {"name", "args"}}`.
+    #[test]
+    fn a_nested_tool_call_is_understood() {
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+        let target = dir.path().join(".env").to_string_lossy().into_owned();
+
+        let write = json!({
+            "toolCall": { "name": "replace_file_content", "args": { "TargetFile": target } }
+        })
+        .to_string();
+        assert!(decide(&write, dir.path()).unwrap().render().is_some());
+
+        let read = json!({
+            "toolCall": { "name": "view_file", "args": { "TargetFile": target } }
+        })
+        .to_string();
+        assert!(decide(&read, dir.path()).unwrap().render().is_none());
+    }
+
+    /// One refusal, in every dialect at once.
+    #[test]
+    fn the_refusal_speaks_every_agents_language() {
+        let reason = "protected".to_string();
+        let rendered = Decision::Deny { reason }.render().unwrap();
+        let value: Value = serde_json::from_str(&rendered).unwrap();
+
+        // Claude Code, Copilot, Codex.
+        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
+        // Antigravity, Gemini CLI.
+        assert_eq!(value["decision"], "deny");
+        assert!(value["reason"].is_string());
+        // Cursor.
+        assert_eq!(value["permission"], "deny");
+    }
+
+    #[test]
+    fn every_agent_gets_a_hook_and_installing_twice_replaces_it() {
+        let dir = project("version: 1\nprotect:\n  - .env\n");
+
+        let first = install_for(dir.path(), Agent::All, false).unwrap();
+        assert_eq!(first.len(), 9, "an agent was dropped from `--agent all`");
+        for installed in &first {
+            assert!(
+                installed.path.is_file(),
+                "{:?} was not written",
+                installed.path
+            );
+            assert!(!installed.replaced);
+        }
+
+        for installed in install_for(dir.path(), Agent::All, false).unwrap() {
+            assert!(
+                installed.replaced,
+                "{:?} was written twice instead of replaced",
+                installed.path
+            );
         }
     }
 

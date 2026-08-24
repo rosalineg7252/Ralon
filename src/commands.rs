@@ -200,9 +200,15 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
     // that a policy which lists protected paths is protecting them. It is not.
     if !availability.iter().any(|(_, status)| status.is_available()) {
         let hooked = [
-            ".claude/settings.json",
-            ".cursor/hooks.json",
-            ".opencode/plugins/ralon.js",
+            hook::claude::SETTINGS,
+            hook::cursor::SETTINGS,
+            hook::opencode::SETTINGS,
+            hook::copilot::SETTINGS,
+            hook::codex::SETTINGS,
+            hook::gemini::SETTINGS,
+            hook::antigravity::SETTINGS,
+            hook::windsurf::SETTINGS,
+            hook::cline::SETTINGS,
         ]
         .iter()
         .any(|relative| policy.root.join(relative).is_file());
@@ -243,9 +249,11 @@ pub fn hook_install(directory: &Path, agent: Agent, dry_run: bool) -> Result<Exi
     }
     println!();
     println!("Those agents will now be refused when they edit a protected path.");
-    println!("This is a courtesy layer: it covers an agent's own edit tools, not");
-    println!("a shell command it runs. Only `ralon run` on Linux is enforcement —");
-    println!("and that works for every agent, including ones with no hooks at all.");
+    println!("This is a courtesy layer: it covers an agent's own edit tools, not a");
+    println!("shell command it runs, and an agent that can edit the config can remove");
+    println!("it. Enforcement is `ralon run` — or `ralon guard` on Windows — which");
+    println!("blocks processes, so it covers every agent, including the ones with no");
+    println!("hooks at all.");
     Ok(ExitCode::from(OK))
 }
 

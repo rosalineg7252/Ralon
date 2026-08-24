@@ -264,12 +264,17 @@ until they start the agent through `ralon run`.
 precise about what that buys:
 
 - It covers the agent's **file-editing tools**, and refuses before the write.
+  Nine agents document a hook that can do this; the list and the exact refusal
+  each one reads are in `README.md`.
 - It does **not** cover a shell command the agent runs. A hook cannot tell
   which paths `sed -i` will touch, so `Bash` is deliberately not matched rather
   than matched badly.
 - It lives in a file inside the project. An agent that can edit it can remove
   it — unless `agent.lock` protects that file too, which on a platform with no
   enforcement is itself only a hook away from being edited.
+- It depends on the agent honouring its own documented contract. That is a
+  different kind of claim from "the kernel refused the write", and the two are
+  never listed as if they were the same thing.
 
 So it is a courtesy, not a guarantee. The recommendation everywhere is to start
 the agent with `ralon run`, where the kernel does the refusing — and on Windows,

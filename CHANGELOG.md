@@ -86,19 +86,32 @@ Windows with real enforcement, and everywhere else by saying so plainly.
   (`--no-hooks` to skip), and points at the one command that protects the
   project rather than leaving the reader to find it.
 - **`ralon hook install`** — wires a refusal into an agent's own configuration
-  instead of leaving each user to hand-write JSON. Covers **Claude Code**
-  (`.claude/settings.json`), **Cursor** (`.cursor/hooks.json`) and **OpenCode**
-  (`.opencode/plugins/ralon.js`), all three by default, `--agent` to pick one.
+  instead of leaving each user to hand-write JSON. **Nine agents**, all by
+  default, `--agent` to pick one: Claude Code, GitHub Copilot, OpenAI Codex,
+  Cursor, Gemini CLI, Google Antigravity, Cline, Windsurf/Cascade and OpenCode.
   Existing settings and unrelated hooks are preserved; a settings file that
   cannot be parsed is never touched.
-- `ralon hook check` makes the decision for every agent: one JSON document
-  carrying both Claude's and Cursor's keys, plus exit code 2, which all three
-  read as "blocked". Paths are found under any of the spellings agents use
-  (`file_path`, `filePath`, `path`, …) at any depth, because one unrecognised
-  key is an edit waved through.
-- On Linux none of this is needed: `ralon run` restricts the *process*, so it
-  already covers Codex, Antigravity, GLM, Gemini and anything shipped next
-  year, hooks or no hooks.
+- `ralon hook check` makes the decision for all nine: one JSON document
+  carrying every key they read — `permissionDecision`, `decision`/`reason`,
+  `permission`/`agent_message`, `cancel`/`errorMessage` — plus exit code 2.
+  Emitting a key an agent ignores costs nothing; omitting one it needs is an
+  edit waved through.
+- Paths are found under any spelling, at any depth, compared after lowercasing
+  and dropping underscores — `file_path`, `filePath`, `TargetFile`,
+  `AbsolutePath` are one entry, not four. Agents nest differently too, so
+  Antigravity's `{"toolCall": {"name", "args"}}` is understood as well.
+- **Reads are never refused.** Some agents call the hook for *every* tool
+  rather than only for edits, so the check recognises a read and allows it.
+  Without that, an agent would be refused permission to look at the very policy
+  governing it. A tool name that is not recognisably a read is treated as a
+  write, because the two mistakes are not equal.
+- **JetBrains Junie and Roo Code are deliberately not installed.** Junie
+  ignores project-local hooks by default, so the file would silently do
+  nothing; Roo Code has no hook API yet, and its `.rooignore` blocks reads as
+  well as writes. Both are covered by `run` and `guard` like everything else.
+- None of this is needed where enforcement is running: `run` and `guard`
+  restrict the *process*, so they already cover Aider, Amazon Q, Junie, Roo
+  Code and anything shipped next year, hooks or no hooks.
 - **An audit that runs before the agent does.** `status` and `run` now report
   conditions that weaken a policy without breaking it — and, on Windows, one
   that means the policy is naming the wrong thing: a protected file another
@@ -134,11 +147,11 @@ Windows with real enforcement, and everywhere else by saying so plainly.
 - `enforce_and_exec` returns the command's exit status instead of only an
   error. Linux still replaces the process and never returns; Windows has no
   inheritable restriction to hand over, so it supervises and reports back.
-- The hook is one file per agent (`hook/{claude,cursor,opencode}.rs`), so
-  supporting another is a new file rather than an edit to the policy logic.
-  Codex, Antigravity, GLM and Gemini are not included: none of them documents a
-  hook that can refuse a file edit before it happens, and shipping a config
-  that silently does nothing would be worse than shipping none.
+- The hook is one file per agent (`hook/{claude,copilot,codex,cursor,gemini,
+  antigravity,windsurf,cline,opencode}.rs`), so supporting another is a new
+  file rather than an edit to the policy logic. The three that share a
+  settings-file shape share one installer rather than three copies drifting
+  apart.
 
 ## 0.1.3
 

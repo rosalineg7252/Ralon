@@ -3,3 +3,5 @@
 # Build output from the npm and PyPI packagers
 /dist
 /artifacts
+
+DESIGN.md

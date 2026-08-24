@@ -136,4 +136,16 @@ pub enum Agent {
     Cursor,
     /// OpenCode — .opencode/plugins/ralon.js
     Opencode,
+    /// GitHub Copilot in VS Code — .github/hooks/ralon.json
+    Copilot,
+    /// OpenAI Codex — .codex/hooks.json
+    Codex,
+    /// Gemini CLI — .gemini/settings.json
+    Gemini,
+    /// Google Antigravity — .agents/hooks.json
+    Antigravity,
+    /// Windsurf / Cascade — .windsurf/hooks.json
+    Windsurf,
+    /// Cline — .clinerules/hooks/PreToolUse
+    Cline,
 }

@@ -109,16 +109,40 @@ and `ralon guard` says so rather than pretending.
 `ralon init` installs this; `ralon hook install` does it on its own, and
 `--no-hooks` skips it.
 
-It writes a refusal into the configuration of **Claude Code**, **Cursor** and
-**OpenCode**, so those agents are turned away before they edit a protected
-path. `--agent` picks one. It works on every platform, including the ones where
-`run` cannot enforce anything — which is exactly where it matters most.
+It writes a refusal into the configuration of every agent that documents a hook
+capable of blocking an edit before it happens — nine of them:
 
-For every other agent — Codex, Antigravity, GLM, Gemini, whatever ships next
-month — use `ralon run`. It restricts the *process*, so it never needed to know
-which agent it was running in the first place. Agents are only listed here
-because a hook has to speak each one's configuration format, and only these
-three document a hook that can refuse an edit before it happens.
+| Agent | File | How it refuses |
+| --- | --- | --- |
+| Claude Code | `.claude/settings.json` | `permissionDecision: deny` |
+| GitHub Copilot (VS Code) | `.github/hooks/ralon.json` | `permissionDecision: deny` |
+| OpenAI Codex | `.codex/hooks.json` | `permissionDecision: deny`, or exit 2 |
+| Cursor | `.cursor/hooks.json` | `permission: deny` |
+| Gemini CLI | `.gemini/settings.json` | `decision: deny` |
+| Google Antigravity | `.agents/hooks.json` | `decision: deny` |
+| Cline | `.clinerules/hooks/PreToolUse` | `cancel: true` |
+| Windsurf / Cascade | `.windsurf/hooks.json` | exit 2 |
+| OpenCode | `.opencode/plugins/ralon.js` | throws |
+
+`--agent` picks one. One `ralon hook check` serves all nine: the refusal is a
+single JSON document carrying every one of those keys, plus exit code 2, since
+emitting a key an agent ignores costs nothing and omitting one it needs is an
+edit waved through.
+
+Two are deliberately **not** installed, for the same reason:
+
+- **JetBrains Junie** ignores project-local `.junie/config.json` hooks by
+  default, so an installed hook would silently do nothing. Add it to
+  `~/.junie/config.json` yourself if you want it — the format is Claude Code's.
+- **Roo Code** has no hook API yet (it is an open feature request). Its
+  `.rooignore` would block edits, but it blocks *reads* too, and protected
+  files are meant to stay readable.
+
+For those two — and for Aider, Amazon Q, and whatever ships next month — use
+`ralon run` or `ralon guard`. They restrict the *process*, so they never needed
+to know which agent was running in the first place. That is the point of the
+whole design: agents are listed here only because a hook has to speak each
+one's configuration format.
 
 Be clear about what it is worth. It covers the agent's **edit tools**; it does
 not cover a shell command the agent runs, because a hook cannot tell which
@@ -248,8 +272,10 @@ Otherwise `run` exits with your command's own status.
 
 ## Documentation
 
-- [`architecture.md`](architecture.md) — how it is built and why the two
-  backends work the way they do
+- [`DESIGN.md`](DESIGN.md) — **start here.** The pipeline, the two process
+  models, what each of the four backends actually does, and the designs that
+  were rejected
+- [`architecture.md`](architecture.md) — deeper on the two Linux backends
 - [`security.md`](security.md) — threat model, what is guaranteed, and the
   limitations that have been tested rather than assumed
 - [`publishing.md`](publishing.md) — cutting a release: what a tag does, and
