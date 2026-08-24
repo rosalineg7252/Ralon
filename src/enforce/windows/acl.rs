@@ -84,7 +84,7 @@ struct AclSizeInformation {
 }
 
 #[link(name = "advapi32")]
-unsafe extern "system" {
+extern "system" {
     fn GetNamedSecurityInfoW(
         object_name: *const u16,
         object_type: u32,
@@ -131,7 +131,7 @@ unsafe extern "system" {
 }
 
 #[link(name = "kernel32")]
-unsafe extern "system" {
+extern "system" {
     fn LocalFree(memory: *mut c_void) -> *mut c_void;
 }
 

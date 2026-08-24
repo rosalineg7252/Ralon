@@ -51,12 +51,10 @@ The command is `ralon` however you install it. The policy file is called
 `agent.lock`, not `ralon.lock`, on purpose: it is a format, not a product.
 Anything could enforce it — this is one thing that does.
 
-`run` enforces on **Linux** (mount namespaces, Landlock) and on **Windows**
-(exclusive file handles). All three block *processes*, so they cover every
-agent — including ones that have never heard of Ralon. **macOS** has no backend
-yet; there `init`, `check`, `status` and `hook install` still work, and the
-hook is a courtesy layer rather than enforcement. `ralon status` says which of
-the two you are getting.
+`run` enforces on **Linux** (mount namespaces, Landlock), **macOS** (the
+Seatbelt sandbox) and **Windows** (exclusive file handles). All of them block
+*processes*, so they cover every agent — including ones that have never heard of
+Ralon. `ralon status` says which one you are getting and why.
 
 ## Use
 
@@ -209,6 +207,16 @@ it does not refuse.
 The protection lasts as long as Ralon does. A command started by `run` is tied
 to a job object that dies with Ralon, so it cannot outlive the locks; a guard
 has no child to tie, so killing one releases them.
+
+**seatbelt** (macOS) — the policy compiled to a Seatbelt profile and applied
+with `sandbox_init`, inherited across `exec` and by every descendant. The only
+backend that can state a denial directly, so it is precise like `mount`,
+inherited like `landlock`, and the only one whose rules cover files that do not
+exist yet — a protected directory refuses new entries without any special
+handling. `run --dry-run --backend seatbelt` prints the profile. `sandbox_init`
+is deprecated and used anyway, for the reason given in `security.md`: it is what
+every sandbox on macOS uses, and the supported alternative needs a signed
+`.app`.
 
 **mount** (default) — read-only bind mounts inside a user + mount namespace,
 locked by entering a second namespace so they cannot be undone. Every parent

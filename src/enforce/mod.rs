@@ -4,6 +4,7 @@
 // on a laptop that cannot enforce it as on the machine that will. Only the
 // syscalls live per platform, one directory each.
 pub mod carve;
+pub mod profile;
 
 #[cfg(target_os = "linux")]
 #[path = "linux/mod.rs"]
@@ -42,6 +43,10 @@ pub enum Backend {
     /// every agent, and lasts exactly as long as the process holding them —
     /// `run` for the life of the command, `guard` until it is stopped.
     Locks,
+    /// macOS: a Seatbelt profile, which can express a denial directly. Precise
+    /// like `mount`, inherited like `landlock`, and the only backend whose
+    /// rules cover files that do not exist yet.
+    Seatbelt,
 }
 
 impl fmt::Display for Backend {
@@ -51,6 +56,7 @@ impl fmt::Display for Backend {
             Backend::Mount => "mount",
             Backend::Landlock => "landlock",
             Backend::Locks => "locks",
+            Backend::Seatbelt => "seatbelt",
         };
         // pad, not write_str, so `{backend:<9}` lines up in tables
         f.pad(name)
@@ -91,23 +97,31 @@ pub struct Plan {
     pub pinned: Vec<PathBuf>,
     /// Landlock only: the carve-out derived from `protected`.
     pub carve: Option<carve::Carve>,
+    /// Seatbelt only: the profile text, which `--dry-run` can print anywhere.
+    pub profile: Option<String>,
 }
 
 impl Plan {
     pub fn build(backend: Backend, root: &Path, protected: Vec<PathBuf>) -> Plan {
         let carve =
             (backend == Backend::Landlock).then(|| carve::plan(&protected, &carve::read_dir));
-        // Both of these protect the *path* as well as the contents, so both
-        // need the directories leading to it.
+        // Every backend that protects the *path* as well as the contents needs
+        // the directories leading to it, or renaming a parent moves the file
+        // out from under the rule.
         let pinned = match backend {
-            Backend::Mount | Backend::Locks => pinned_directories(root, &protected),
+            Backend::Mount | Backend::Locks | Backend::Seatbelt => {
+                pinned_directories(root, &protected)
+            }
             _ => Vec::new(),
         };
+        let profile = (backend == Backend::Seatbelt)
+            .then(|| profile::build(&protected, &pinned, &profile::on_disk));
         Plan {
             backend,
             protected,
             pinned,
             carve,
+            profile,
         }
     }
 }
@@ -180,7 +194,12 @@ pub fn resolve(requested: Backend) -> Result<Backend> {
         Backend::Auto => {
             // Mount first: it protects exactly what the policy names and leaves
             // everything else alone.
-            for backend in [Backend::Mount, Backend::Landlock, Backend::Locks] {
+            for backend in [
+                Backend::Mount,
+                Backend::Landlock,
+                Backend::Seatbelt,
+                Backend::Locks,
+            ] {
                 if find(backend).is_available() {
                     return Ok(backend);
                 }

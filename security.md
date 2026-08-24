@@ -16,11 +16,11 @@ ones that outlive it.
 Which processes are covered depends on the platform, and it is worth being
 exact:
 
-| | Linux (`run`) | Windows (`run`) | Windows (`guard`) |
-| --- | --- | --- | --- |
-| the agent and everything it spawns | yes | yes | yes |
-| an agent started any other way | no | no | **yes** |
-| survives being killed | nothing to kill | job object kills the command too | no — the locks go with it |
+| | Linux (`run`) | macOS (`run`) | Windows (`run`) | Windows (`guard`) |
+| --- | --- | --- | --- | --- |
+| the agent and everything it spawns | yes | yes | yes | yes |
+| an agent started any other way | no | no | no | **yes** |
+| survives being killed | nothing to kill | nothing to kill | job object kills the command too | no — the locks go with it |
 
 **Does not defend against:**
 
@@ -141,6 +141,48 @@ the agent after adding files that need protecting.
 **Landlock's create-restriction is a functional cost, not a security one.** See
 `architecture.md`. It is why `mount` is the default.
 
+## macOS
+
+`run` enforces through a Seatbelt profile: `agent.lock` is compiled to SBPL and
+applied to this process with `sandbox_init`, which is inherited across `exec`
+and by every descendant and cannot be left. That is the same property the Linux
+backends have — `run` becomes the command, so there is no supervisor to kill.
+
+Seatbelt is the only one of the three that can state the policy directly,
+because SBPL has `deny`:
+
+```text
+(version 1)
+(allow default)
+(deny file-write* (literal "/proj/.env") (subpath "/proj/config"))
+```
+
+Two consequences follow, and both are improvements on the platforms either side
+of it. Nothing outside the named paths behaves differently, so unlike Landlock
+there is no create-restriction to work around. And a protected *directory*
+covers entries created inside it later, so unlike the Windows locks there is no
+gap needing an ACL to reach. Directories on the way to a protected path are
+denied as `literal` nodes rather than `subpath` trees: that stops the directory
+being renamed or removed without making its contents read-only.
+
+Specific to this backend:
+
+- **`sandbox_init` is deprecated** — since 10.8, with no public header. It is
+  also what every sandboxed application on macOS uses, and the supported
+  alternative is the App Sandbox, which is an entitlement on a signed `.app`
+  bundle and not something a command-line tool can be. So this is a dependency
+  on a deprecated API, named here rather than left implied. If it is ever
+  removed, `run` fails loudly: the kernel's refusal is reported verbatim and
+  the command is not started.
+- **A rejected profile is an error, never a warning.** Nothing is applied
+  partially.
+- Rules name paths, so a hard link or a second path to the same file is outside
+  them, exactly as on Linux. `audit.rs` reports the hard-link case.
+
+The attack tables in `tests/enforcement.rs` run against this backend on a real
+macOS kernel in CI, with `RALON_REQUIRE_BACKEND=1` so that "nothing was tested"
+fails the job.
+
 ## Windows
 
 `run` enforces on Windows through exclusive share-mode handles: Ralon holds
@@ -212,9 +254,11 @@ notice there can be.
 
 ## Where there is no enforcement at all
 
-On macOS there is no backend yet, so `run` refuses to start. That refusal is
-the honest answer, but it leaves an agent started any other way completely
-unrestricted — which is the situation most people are actually in.
+Every platform Ralon ships for now has a backend for `run`. What none of Linux
+or macOS has is a *guard*: their restrictions are inherited by a process before
+it starts, never imposed on one already running, so an agent launched any other
+way is unrestricted there — which is the situation most people are actually in
+until they start the agent through `ralon run`.
 
 `ralon hook install` writes a refusal into the agent's own configuration. Be
 precise about what that buys:
@@ -227,9 +271,9 @@ precise about what that buys:
   it — unless `agent.lock` protects that file too, which on a platform with no
   enforcement is itself only a hook away from being edited.
 
-So it is a courtesy, not a guarantee, and the honest recommendation on those
-platforms is to run the agent under Linux — WSL is enough — where the kernel
-does the refusing.
+So it is a courtesy, not a guarantee. The recommendation everywhere is to start
+the agent with `ralon run`, where the kernel does the refusing — and on Windows,
+`ralon guard`, which does not care how the agent was started.
 
 ## Verifying it yourself
 

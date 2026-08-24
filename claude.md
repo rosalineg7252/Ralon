@@ -84,7 +84,8 @@ agent-independent. Do not rename the file after the tool.
       enforce/carve.rs             Landlock rule planning (pure, testable)
       enforce/linux/               mount.rs landlock.rs sys.rs — the syscalls
       enforce/windows/             locks.rs acl.rs job.rs guard.rs — the Win32 calls
-      enforce/macos/               no backend yet; documents the one it would use
+      enforce/profile.rs           Seatbelt profile text (pure, testable anywhere)
+      enforce/macos/               seatbelt.rs — sandbox_init, and nothing else
       enforce/unguarded.rs         "a guard cannot work here", and why
     tests/cli.rs                   CLI behaviour, every platform
     tests/enforcement.rs           real bypass attempts, Linux only
@@ -105,6 +106,15 @@ to everyone else, Linux restrictions are *inherited* by a process and cannot be
 imposed on one you did not start. Neither replaces the other, and `init` starts
 neither: it writes a template nobody has edited yet, and a guard holding a
 snapshot of that would protect the wrong paths convincingly.
+
+macOS is one backend, **seatbelt** — the policy compiled to SBPL and applied
+with `sandbox_init`. It is the only mechanism here that can say `deny`, so it
+needs no carve-out and no ACL: protected directories cover what is created in
+them later, and ancestors are denied as `literal` nodes so they cannot be
+renamed while staying writable inside. Generating the profile is planning and
+lives in `enforce/profile.rs`, tested on every platform; only `sandbox_init`
+is under `macos/`. Nobody working on this repo can run it — verification is the
+macOS CI job, which sets `RALON_REQUIRE_BACKEND=1` so a skipped test fails.
 
 Two Linux backends, `auto` prefers the first:
 
@@ -133,6 +143,11 @@ the tested limitations, `publishing.md` for release steps.
 
   (`seccomp=unconfined` is what makes the mount backend available in a
   container; without it only Landlock is exercised.)
+- macOS cannot be verified locally by anyone here — there is no container for
+  it. Changes to the Seatbelt backend are checked by the macOS CI job, and the
+  half that *can* be checked anywhere (the profile text) is unit-tested, so a
+  change lands with `--dry-run --backend seatbelt` output in the PR and a green
+  macOS job, not with a description of what it should do.
 - A new bypass gets a failing test in `tests/enforcement.rs` first. The attack
   tables there are one line per attack and run against every available backend.
 - **Assert on the filesystem, never on an exit code.** `del` returns 0 when it

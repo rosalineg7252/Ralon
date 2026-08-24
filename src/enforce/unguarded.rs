@@ -1,13 +1,19 @@
 //! Platforms where a policy cannot be held open on its own.
 //!
-//! Not an omission — the shape of the mechanism. Linux enforcement is a
-//! restriction applied to a process *before* it runs: a Landlock domain and a
-//! locked mount namespace are inherited, never imposed, so there is no way for
-//! a process to reach out and restrict another one it did not start. The
-//! interfaces that could — `chattr +i`, fanotify permission events, a LSM of
-//! one's own — all want capabilities a developer tool has no business holding,
-//! and asking for root to protect a file from an agent gives the agent a root
-//! process to talk to.
+//! Not an omission — the shape of the mechanism. Unix enforcement here is a
+//! restriction applied to a process *before* it runs: a Landlock domain, a
+//! locked mount namespace and a Seatbelt profile are all inherited, never
+//! imposed, so there is no way for a process to reach out and restrict another
+//! one it did not start. The interfaces that could — `chattr +i`, fanotify
+//! permission events, macOS's Endpoint Security, an LSM of one's own — all want
+//! privileges a developer tool has no business holding, and asking for root to
+//! protect a file from an agent gives the agent a root process to talk to.
+//!
+//! macOS has one thing Linux does not: `chflags uchg`, which marks a file
+//! immutable and is undone by `chflags nouchg` — one command, available to the
+//! agent, no privileges needed. That is a narrowing of the same kind as the
+//! Windows deny ACE, not a guard, and it is not implemented rather than being
+//! implemented and described as protection.
 //!
 //! So on these platforms `run` is not an inconvenience on the way to something
 //! better; it *is* the something better. A guard would be a background process

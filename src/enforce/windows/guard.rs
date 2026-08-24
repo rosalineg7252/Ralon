@@ -78,7 +78,7 @@ struct ProcessInformation {
 }
 
 #[link(name = "kernel32")]
-unsafe extern "system" {
+extern "system" {
     fn CreateEventW(
         attributes: *mut c_void,
         manual_reset: i32,

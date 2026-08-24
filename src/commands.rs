@@ -339,8 +339,20 @@ fn print_plan(policy: &Policy, found: &[ProtectedPath], plan: &Plan, command: &[
             "pinned     {}, which cannot be renamed or removed",
             count(plan.pinned.len(), "directory", "directories")
         );
+        // How they are pinned differs — a mount point, a held handle, a deny
+        // rule — so the label says what it means rather than how it is done.
         for directory in &plan.pinned {
-            println!("  mount point  {}", directory.display());
+            println!("  no rename  {}", directory.display());
+        }
+    }
+
+    if let Some(profile) = &plan.profile {
+        // Printed in full, and printable on any machine: the profile is the
+        // whole policy in the form the kernel will read it, so a reviewer can
+        // check what will be denied without owning a Mac.
+        println!("seatbelt   the profile that would be applied");
+        for line in profile.lines() {
+            println!("  {line}");
         }
     }
 

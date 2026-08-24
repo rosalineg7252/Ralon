@@ -29,6 +29,18 @@ jobs:
       - if: runner.os == 'Linux'
         run: cargo run --quiet -- status
 
+      # macOS has a backend of its own now, and unlike a container's kernel,
+      # Seatbelt is always there — so "nothing was tested" is a failure here
+      # rather than a shrug. This is the only place the profile is applied to a
+      # real kernel; everything else about it is generated and unit-tested.
+      - name: Attempt every bypass, against Seatbelt
+        if: runner.os == 'macOS'
+        env:
+          RALON_REQUIRE_BACKEND: 1
+        run: |
+          cargo run --quiet -- status
+          cargo test --test enforcement -- --nocapture
+
       # The release ships musl binaries, and musl's libc bindings are not the
       # same set as glibc's — `libc::ST_*` exists only on glibc. Catching that
       # here costs seconds; catching it during a release costs a version

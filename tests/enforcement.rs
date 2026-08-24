@@ -1,9 +1,16 @@
 //! Real bypass attempts against a real sandbox.
 //!
 //! Every test here runs a shell inside `ralon run` and then checks the
-//! filesystem from outside it. Linux only: there is nothing to enforce with
-//! elsewhere.
-#![cfg(target_os = "linux")]
+//! filesystem from outside it — never an exit code, which lies in both
+//! directions. Unix only: `run` on Windows is covered by `tests/cli.rs`,
+//! because the attacks there are `cmd.exe` and the interesting cases (a guard,
+//! a held-open file) have no counterpart here.
+//!
+//! The tables run against every backend the machine offers: `mount` and
+//! `landlock` on Linux, `seatbelt` on macOS. A backend that behaves
+//! differently says so in the one test that asks about the difference, rather
+//! than by being excluded from the rest.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
@@ -36,6 +43,11 @@ impl Sandbox {
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        // macOS hands out temp directories under `/var`, which is a symlink to
+        // `/private/var`. Ralon canonicalises the paths it protects, so the
+        // test works from the real path too — otherwise these tests would
+        // quietly be about symlink resolution rather than about enforcement.
+        let root = fs::canonicalize(&root).unwrap_or(root);
         let sandbox = Sandbox { root };
 
         sandbox.write("agent.lock", POLICY);
@@ -88,11 +100,20 @@ impl Drop for Sandbox {
     }
 }
 
+/// Backends this platform could offer at all. Whether it *does* is asked of
+/// the tool below, never assumed here.
+const CANDIDATES: &[&str] = if cfg!(target_os = "linux") {
+    &["mount", "landlock"]
+} else {
+    &["seatbelt"]
+};
+
 /// Backends this kernel can actually provide, as reported by the tool itself.
 fn usable_backends() -> Vec<&'static str> {
     let probe = Sandbox::new();
-    ["mount", "landlock"]
-        .into_iter()
+    CANDIDATES
+        .iter()
+        .copied()
         .filter(|backend| {
             Command::new(BINARY)
                 .arg("--dir")
@@ -148,8 +169,11 @@ const ATTACKS: &[(&str, &str)] = &[
         "replace by delete and create",
         "rm -f src/index.tsx; echo hacked > src/index.tsx",
     ),
-    ("hard link over", "ln -f /etc/hostname src/index.tsx"),
-    ("symlink over", "ln -sf /etc/hostname src/index.tsx"),
+    // `/etc/hosts` rather than anything distribution-specific: this table runs
+    // on macOS too, and a source file that does not exist would turn a real
+    // attack into a shell error that passes.
+    ("hard link over", "ln -f /etc/hosts src/index.tsx"),
+    ("symlink over", "ln -sf /etc/hosts src/index.tsx"),
     (
         "chmod then write",
         "chmod 777 src/index.tsx; echo hacked > src/index.tsx",
@@ -253,6 +277,12 @@ fn unprotected_files_stay_writable() {
 /// preferred: Landlock cannot grant "create here" without also granting "write
 /// to the protected file here", so directories leading to a protected path stop
 /// accepting new entries.
+///
+/// `mount` and `seatbelt` both express the policy exactly and leave the
+/// directory alone. If this ever starts failing for `seatbelt`, the ancestor
+/// rules have become subtrees and the whole project has quietly gone
+/// read-only — which would look like nothing at all until someone tried to
+/// work in it.
 #[test]
 fn only_landlock_blocks_new_files_beside_a_protected_one() {
     for_each_backend(|backend| {
@@ -260,10 +290,10 @@ fn only_landlock_blocks_new_files_beside_a_protected_one() {
         let output = sandbox.attempt(backend, "echo new > notes.md");
 
         match backend {
-            "mount" => {
+            "mount" | "seatbelt" => {
                 assert!(
                     output.status.success(),
-                    "mount: creating a file next to a protected one should work\nstderr: {}",
+                    "{backend}: creating a file next to a protected one should work\nstderr: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 assert_eq!(sandbox.read("notes.md"), "new\n");
@@ -293,7 +323,9 @@ fn the_restriction_is_inherited_by_child_processes() {
     });
 }
 
+/// Escapes that only exist where mounts do.
 #[test]
+#[cfg(target_os = "linux")]
 fn the_sandbox_cannot_be_unmounted_or_bound_around() {
     let escapes = [
         ("umount", "umount src/index.tsx; echo hacked > src/index.tsx"),
