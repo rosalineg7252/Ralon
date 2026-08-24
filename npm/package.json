@@ -1,5 +1,5 @@
 {
-  "name": "ralon",
+  "name": "ralonlock",
   "version": "0.0.0",
   "description": "Filesystem policy for AI coding agents: kernel-enforced write protection driven by an agent.lock file",
   "license": "Apache-2.0",

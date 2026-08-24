@@ -39,8 +39,8 @@ binary, a config file, and two kernel features.
 
 ```console
 $ cargo install ralon         # or from a checkout: cargo install --path .
-$ npm install -g ralon        # prebuilt binary, wrapped
-$ pip install ralonlock       # same binary; `ralon` was taken on PyPI
+$ npm install -g ralonlock    # prebuilt binary, wrapped
+$ pip install ralonlock       # same binary
 ```
 
 Or download a binary from the

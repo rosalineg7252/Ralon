@@ -17,6 +17,8 @@ exclude = [
     ".github/",
     "npm/",
     "packaging/",
+    "dist/",
+    "artifacts/",
     "publishing.md",
     "claude.md",
     "agent.lock",

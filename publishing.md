@@ -26,16 +26,17 @@ linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
     ┌─────────────┼─────────────┐
     ▼             ▼             ▼
  crates.io       npm           PyPI
-ralon crate  ralon + five   ralonlock
-             @stoneware-dev  wheels
+ralon crate   ralonlock     ralonlock
+            + @stoneware-dev   wheels
 ```
 
-The command is `ralon` from all three. Only the PyPI *project* is called
-`ralonlock`, because `ralon` was not available there.
+The command is `ralon` from all three. Only the crate kept that name: npm
+rejects `ralon` as too similar to the existing `raven`, and PyPI did not have
+it free either, so both settled on `ralonlock`.
 
 `.github/workflows/release.yml` does all of it. npm and PyPI ship the *same*
 binaries the workflow built — not a second compile — so what someone installs
-with `npm i ralon` is byte-identical to the archive on the release page.
+with `npm i ralonlock` is byte-identical to the archive on the release page.
 
 The `approve` gate is deliberately manual. Every one of these registries is
 effectively append-only, so a mistaken tag is not something to discover
@@ -55,8 +56,11 @@ the `ralon` crate → repository secret `CARGO_REGISTRY_TOKEN`.
 
 - the five platform packages are **scoped**, `@stoneware-dev/<platform>`, and
   owned by the org of that name;
-- the package users install, `ralon`, is **unscoped**. Unscoped names live in
-  npm's global namespace and belong to a *user account*, not to any org.
+- the package users install, `ralonlock`, is **unscoped**. Unscoped names live
+  in npm's global namespace and belong to a *user account*, not to any org.
+  It is not called `ralon` because npm's similarity check refuses that name —
+  too close to the existing `raven` — and scoping it instead would have made
+  the install `@stoneware-dev/ralon`.
 
 ```console
 $ npm login
@@ -64,10 +68,10 @@ $ npm org create stoneware-dev          # free for public packages
 ```
 
 The token must therefore cover both. A granular token limited to the
-`@stoneware-dev` scope publishes the five and then fails on `ralon` — with a
-404, because npm will not admit that a package you cannot write to exists. Give
-it read+write on **all packages**, or publish `ralon` once by hand and then add
-it to the token by name. Save it as the repository secret `NPM_TOKEN`.
+`@stoneware-dev` scope publishes the five and then fails on `ralonlock` — with
+a 404, because npm will not admit that a package you cannot write to exists.
+Give it read+write on **all packages**, or publish `ralonlock` once by hand and
+then add it to the token by name. Save it as the repository secret `NPM_TOKEN`.
 
 **PyPI** — the project is **`ralonlock`**, not `ralon`. Publishing → add a
 trusted publisher: project `ralonlock`, owner `stoneware-dev`, repository
@@ -132,7 +136,7 @@ published is broken on install, for everyone.
 
 **npm** (`npm/`, assembled by `packaging/build-npm.mjs`) — five packages each
 holding one binary and declaring `os`/`cpu`, so npm downloads only the matching
-one, plus the `ralon` package listing them as `optionalDependencies` whose
+one, plus the `ralonlock` package listing them as `optionalDependencies` whose
 `bin/ralon.js` execs whichever was installed. The shim passes the exit code
 straight through: ralon's codes are its interface (1 = a path is protected,
 2 = error), and a hook that swallowed them would report every policy as

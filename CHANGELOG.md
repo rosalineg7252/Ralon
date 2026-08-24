@@ -6,34 +6,34 @@ the CLI is untouched.
 
 ## 0.1.2
 
-No change to what Ralon does. `0.1.1` reached crates.io but not npm or PyPI,
-which needed configuration that could only be fixed by releasing again — the
-packaging scripts are read from the tag, so a re-run could not pick them up.
-npm and PyPI therefore start at `0.1.2`.
+The first release to reach npm and PyPI. No change to what Ralon does: `0.1.1`
+published to crates.io, but the npm and PyPI configuration could only be fixed
+by releasing again, because the packaging scripts are read from the tag.
 
-- npm platform packages are scoped `@stoneware-dev/<platform>`; `@ralon` was
-  already taken. The package users install is still the unscoped `ralon`.
-- Release workflow actions moved to their Node 24 versions, clearing the
-  deprecation warnings.
+- `npm install -g ralonlock` — the binaries wrapped as `ralonlock`, plus five
+  `@stoneware-dev/<platform>` packages so npm downloads only the one that
+  matches. Neither `ralon` nor `@ralon` was available: npm refuses the first as
+  too similar to the existing `raven`, and the second scope was taken.
+- `pip install ralonlock` / `uv tool install ralonlock` — the same binaries as
+  wheels.
+- The command is `ralon` however it was installed. Only the crate kept the
+  name.
+- Release workflow actions moved to their Node 24 versions, and the npm step
+  skips versions that are already published, so a partial failure can be
+  re-run instead of costing a version.
 
 ## 0.1.1
 
-Published to crates.io only. No change to what Ralon does or to what a policy
-means. This release exists so
-there is one that was built and published by CI from a tagged commit, and to
-claim the name on npm and PyPI with the same binaries.
+Published to crates.io, with prebuilt binaries on the GitHub release. No change
+to what Ralon does or to what a policy means; this is the first release built
+and published by CI from a tagged commit.
 
 ### Distribution
 
 - Prebuilt binaries for five targets, attached to the GitHub release with
   SHA-256 checksums. Linux builds are static musl, so they run anywhere,
   including containers with no glibc. `cargo binstall ralon` works.
-- `npm install ralon` — the binaries wrapped as `ralon` plus five
-  `@stoneware-dev/<platform>` packages, so npm downloads only the one that matches.
-- `pip install ralonlock` / `uv tool install ralonlock` — the same binaries as
-  wheels. The PyPI project is `ralonlock` because `ralon` was unavailable
-  there; the command it installs is still `ralon`.
-- A tag now publishes to all three registries after one manual approval.
+- A tag publishes to all three registries after one manual approval.
 
 ### Packaging
 

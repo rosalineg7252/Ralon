@@ -4,10 +4,13 @@
 agree.
 
 ```console
-$ npx ralon init                 # write a starter agent.lock
-$ npx ralon check src/auth.ts    # is this path protected? exits 1 if it is
-$ npx ralon run -- claude        # run an agent that cannot touch them
+$ npm install -g ralonlock       # the command it installs is `ralon`
+$ ralon init                     # write a starter agent.lock
+$ ralon check src/auth.ts        # is this path protected? exits 1 if it is
+$ ralon run -- claude            # run an agent that cannot touch them
 ```
+
+Without installing: `npx ralonlock check src/auth.ts`.
 
 Inside `ralon run` — and in every process it spawns — the protected paths are
 read-only to the kernel. Not a linter, not a hook the agent can talk its way
