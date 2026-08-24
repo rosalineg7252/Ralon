@@ -201,12 +201,16 @@ jobs:
         run: |
           publish() {
             directory="$1"
-            name=$(node -p "require('./$directory/package.json').name")
-            version=$(node -p "require('./$directory/package.json').version")
+            name=$(node -p "require('$PWD/$directory/package.json').name")
+            version=$(node -p "require('$PWD/$directory/package.json').version")
             if npm view "$name@$version" version > /dev/null 2>&1; then
               echo "$name@$version is already published"
             else
-              npm publish --access public "$directory"
+              # The leading ./ is load-bearing: npm parses a bare `dist/ralon`
+              # as the GitHub shorthand user/repo and tries to clone it. Paths
+              # with three segments happen to escape that, which is why the
+              # platform packages published and this one did not.
+              npm publish --access public "./$directory"
             fi
           }
 

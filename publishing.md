@@ -214,20 +214,26 @@ the endpoint cannot be used to probe for private packages, which makes it look
 like the wrong error. Run `npm org create stoneware-dev` and give the token
 read+write on `@stoneware-dev/*`. A token problem alone would be 401.
 
-**npm: the five platform packages publish and `ralon` fails** — the token
-covers the scope but not the unscoped name, as above. The platform packages are
-already up, so the release only needs its last package; there is no reason to
-burn a version:
+**npm: `git ls-remote ssh://git@github.com/dist/ralon.git` / "Repository not
+found"** — npm parsed the *path* `dist/ralon` as the GitHub shorthand
+`user/repo` and went looking for a repository. Any two-segment path does this;
+`dist/platforms/darwin-arm64` has three and escapes it, which is exactly why
+the platform packages publish and the last one does not. Pass `./dist/ralon`.
+The workflow does.
+
+**npm: the five platform packages publish and `ralon` fails** — either the
+above, or a token scoped to `@stoneware-dev` that cannot create an unscoped
+name. The platform packages are already up, so the release only needs its last
+package; there is no reason to burn a version:
 
 ```console
 $ npm login
 $ node packaging/build-npm.mjs --version 0.1.2 --meta-only --out dist
-$ npm publish --access public dist/ralon
+$ npm publish --access public ./dist/ralon
 ```
 
 `--meta-only` builds just that package, listing every platform, without needing
-the binaries to hand. Fix the token afterwards so the next release does not
-stop in the same place.
+the binaries to hand.
 
 **PyPI: `invalid-publisher: valid token, but no corresponding publisher`** —
 the OIDC claims do not match the trusted publisher. The log prints the claims;
