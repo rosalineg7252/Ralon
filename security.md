@@ -6,24 +6,35 @@ tested rather than reasoned about.
 
 ## Threat model
 
-**Defends against:** a process that runs with your privileges, started by you
-through `ralon run`, that tries to modify a path the policy protects. That
-covers the ordinary case — an agent editing a file it should not have touched —
-and the adversarial one: a prompt-injected agent that deliberately goes after
-`.env`, an agent that shells out to `sed`, `python` or `git checkout`, and any
-process it spawns, including ones that outlive it.
+**Defends against:** a process that runs with your privileges and tries to
+modify a path the policy protects. That covers the ordinary case — an agent
+editing a file it should not have touched — and the adversarial one: a
+prompt-injected agent that deliberately goes after `.env`, an agent that shells
+out to `sed`, `python` or `git checkout`, and any process it spawns, including
+ones that outlive it.
+
+Which processes are covered depends on the platform, and it is worth being
+exact:
+
+| | Linux (`run`) | Windows (`run`) | Windows (`guard`) |
+| --- | --- | --- | --- |
+| the agent and everything it spawns | yes | yes | yes |
+| an agent started any other way | no | no | **yes** |
+| survives being killed | nothing to kill | job object kills the command too | no — the locks go with it |
 
 **Does not defend against:**
 
 - **Root.** Anything that can become root outside the namespace can undo all of
   it. This is a guardrail for a tool you invited in, not a defence against an
   attacker who already has your password.
-- **Processes you did not start this way.** The policy binds the process tree
-  under `ralon run`. An agent launched directly is unrestricted, and so is
-  a daemon that was already running — a language server, a file-watcher, an
-  editor with a remote API. If a sandboxed process can ask one of those to write
-  a file, the write happens outside the sandbox. Do not run an IPC-reachable
-  writer alongside an agent you do not trust.
+- **Processes you did not start this way** — on Linux. The policy binds the
+  process tree under `ralon run`. An agent launched directly is unrestricted,
+  and so is a daemon that was already running — a language server, a
+  file-watcher, an editor with a remote API. If a sandboxed process can ask one
+  of those to write a file, the write happens outside the sandbox. Do not run an
+  IPC-reachable writer alongside an agent you do not trust. On Windows this is
+  what `ralon guard` exists for: it refuses every process, so the daemon is
+  covered too.
 - **Reading.** Protected files stay readable, deliberately: `agent.lock`
   declares what must not *change*. A secret an agent must not read does not
   belong in the project directory.
@@ -110,6 +121,13 @@ available in exactly the environments where this attack is; forcing
 `--backend landlock` on a machine with unprivileged user namespaces gives up a
 real guarantee.
 
+**A file another program is using cannot be locked** (Windows). A live SQLite
+database, a log a dev server appends to, a state file a daemon rewrites: the
+handle Ralon needs is refused because that program already holds one. `status`
+warns and `run` refuses to start, rather than reporting the path as locked
+while it is not. This is a policy naming the wrong thing — protect the files a
+program owns, not the ones it has open.
+
 **Only paths that exist can be protected.** A bind mount needs something to
 mount. `status` and `run` warn about patterns matching nothing. The Landlock
 backend is stricter here by accident of its design: it forbids creating anything
@@ -142,22 +160,61 @@ directory, remove the protected tree, rewrite the policy, and clear the
 read-only attribute then write. All refused; ordinary edits elsewhere
 unaffected.
 
-Two limits, both specific to this backend:
+### New files in a protected directory
 
-- **A new file inside a protected directory is not covered.** Existing files
-  are locked individually and the directory cannot be renamed or removed, but
-  creating a new entry inside it succeeds. Tested, and true.
-- **Protection lasts as long as `run` does.** There is no inheritable
-  restriction to hand over, so Ralon supervises rather than `exec`ing. An agent
-  could kill its supervisor, so the command is placed in a job object that dies
-  with Ralon — killing Ralon kills the command with it, tested — but an agent
-  started outside `ralon run` is unrestricted, as on every platform.
+Creating an entry inside a directory opens no existing object, so no share mode
+is ever consulted and no handle can refuse it. Ralon adds a deny ACE for
+`Everyone` over `FILE_ADD_FILE` and `FILE_ADD_SUBDIRECTORY` while it is
+running, which refuses creating a file, creating a subdirectory, copying or
+moving a file in, and renaming one inside — all tested.
+
+**This one is a narrowing, not a guarantee, and the difference is the point of
+the rest of this page.** The agent runs as the same user and owns the
+directory, and an owner's `WRITE_DAC` is implicit: it cannot be denied. Tested
+directly — with an explicit deny ACE on `WRITE_DAC` itself, the owner still
+removed it and created the file. So an agent that decides to rewrite the ACL
+gets its write. What this buys is that every ordinary create is refused and the
+remaining route is one an agent has to take deliberately. The handle locks are
+the part that cannot be argued with; this is not, and is labelled accordingly.
+
+The ACE is removed when Ralon exits. If Ralon is killed instead, it stays —
+which fails *closed*, on a directory the policy protects anyway. `status`
+reports it and `ralon guard --stop` clears it. A directory whose ACL already
+names `Everyone` is left alone and reported, rather than having permissions
+Ralon did not write rebuilt around it.
+
+### A guard, and what it changes
+
+`ralon run` protects the agent it starts. `ralon guard` protects the ones it
+does not: it holds the same locks with no command to supervise, and Windows
+refuses them to every process on the machine. An agent launched from an IDE, an
+extension, another terminal, or installed next month is refused without knowing
+Ralon exists — verified against unwrapped `cmd.exe` for overwrite, append,
+delete, rename, writing a protected file, rewriting the policy, and creating a
+new file in a protected directory.
+
+That inverts the usual platform ranking, and only on this one point. Linux
+enforcement is *inherited*: applied to a process before it runs, so there is
+nothing left to kill, and correspondingly no way to reach out and restrict a
+process you did not start. Windows enforcement is *held*: it covers every
+process, and it lasts exactly as long as the process holding it. A guard can be
+killed, and killing it releases the locks. `run` on Linux cannot be.
+
+### Lifetime
+
+**Protection lasts as long as Ralon does.** There is no inheritable restriction
+to hand over, so Ralon supervises rather than `exec`ing. An agent could kill its
+supervisor, so a command started by `run` is placed in a job object that dies
+with Ralon — killing Ralon kills the command with it, tested. A guard has no
+child to put in a job, so killing a guard leaves the agent running with the
+files writable; `status` says whether one is running, which is the only
+notice there can be.
 
 ## Where there is no enforcement at all
 
-On Windows and macOS there is no backend yet, so `run` refuses to start. That
-refusal is the honest answer, but it leaves an agent started any other way
-completely unrestricted — which is the situation most people are actually in.
+On macOS there is no backend yet, so `run` refuses to start. That refusal is
+the honest answer, but it leaves an agent started any other way completely
+unrestricted — which is the situation most people are actually in.
 
 `ralon hook install` writes a refusal into the agent's own configuration. Be
 precise about what that buys:

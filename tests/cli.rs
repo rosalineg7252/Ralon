@@ -50,6 +50,17 @@ impl Project {
             .output()
             .expect("failed to run ralon")
     }
+
+    /// A command run *outside* Ralon, the way an agent someone launched from
+    /// an IDE is outside it.
+    #[cfg(windows)]
+    fn shell(&self, command: &str) {
+        Command::new("cmd")
+            .args(["/c", command])
+            .current_dir(&self.root)
+            .output()
+            .expect("failed to run cmd");
+    }
 }
 
 impl Drop for Project {
@@ -272,6 +283,125 @@ fn windows_locks_stop_a_write_from_any_process() {
     assert!(fs::read_to_string(project.root.join("src/App.tsx"))
         .unwrap()
         .contains("edited"));
+}
+
+/// The gap a handle cannot reach: creating a *new* entry inside a protected
+/// directory opens no existing object, so no share mode is consulted. A deny
+/// ACE covers it, and has to come off again afterwards.
+#[test]
+#[cfg(windows)]
+fn windows_refuses_new_files_in_a_protected_directory() {
+    let project = Project::new(Some(POLICY));
+    project.write("config/db.yaml", "locked\n");
+
+    for attack in [
+        "echo hacked > config\\new.yaml",
+        "mkdir config\\sneaky",
+        "echo hacked > config\\nested\\deep.yaml",
+    ] {
+        project.run(&["run", "--quiet", "--", "cmd", "/c", attack]);
+    }
+
+    assert!(
+        !project.root.join("config/new.yaml").exists(),
+        "a new file appeared inside a protected directory"
+    );
+    assert!(!project.root.join("config/sneaky").exists());
+    assert!(!project.root.join("config/nested").exists());
+
+    // Renaming an existing entry needs the same right, so it goes too.
+    project.run(&[
+        "run",
+        "--quiet",
+        "--",
+        "cmd",
+        "/c",
+        "ren config\\db.yaml x.yaml",
+    ]);
+    assert!(project.root.join("config/db.yaml").is_file());
+
+    // And the directory is an ordinary directory again once nothing is
+    // running. Leaving a permission behind would be worse than the gap.
+    fs::write(project.root.join("config/after.yaml"), "fine")
+        .expect("the ACL should have been restored when the command finished");
+}
+
+/// A file something else is using is the wrong thing to protect — a live
+/// database, a log a dev server appends to. Ralon cannot lock it, and finding
+/// that out when `run` fails is worse than being told beforehand.
+#[test]
+#[cfg(windows)]
+fn a_file_already_in_use_is_reported_before_it_becomes_a_failure() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+    let project = Project::new(Some("version: 1\nprotect:\n  - app.db\n"));
+    let database = project.write("app.db", "rows\n");
+
+    let quiet = stderr(&project.run(&["status"]));
+    assert!(!quiet.contains("app.db is held open"), "{quiet}");
+
+    // Opened for writing and shared only for reading: what a running database
+    // does, and what makes the lock impossible to take.
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&database)
+        .unwrap();
+
+    let warned = stderr(&project.run(&["status"]));
+    assert!(warned.contains("app.db is held open"), "{warned}");
+
+    // And it refuses to run rather than reporting a path as locked when it is
+    // not. A failure to enforce is never silent.
+    let refused = project.run(&["run", "--quiet", "--", "cmd.exe", "/c", "ver"]);
+    assert_eq!(code(&refused), 2, "{}", stderr(&refused));
+
+    drop(holder);
+    let quiet_again = stderr(&project.run(&["status"]));
+    assert!(
+        !quiet_again.contains("app.db is held open"),
+        "{quiet_again}"
+    );
+}
+
+/// The guard: protection with no command to wrap, which is the only way to
+/// cover an agent started from an IDE, an extension, or another terminal.
+#[test]
+#[cfg(windows)]
+fn windows_guard_protects_a_process_it_did_not_start() {
+    let project = Project::new(Some(POLICY));
+    let secret = project.write(".env", "SECRET=original\n");
+    project.write("src/App.tsx", "writable\n");
+
+    // Nothing is guarding yet, so this must succeed — otherwise the assertion
+    // below proves nothing.
+    project.shell("echo unguarded > .env");
+    assert!(fs::read_to_string(&secret).unwrap().contains("unguarded"));
+    fs::write(&secret, "SECRET=original\n").unwrap();
+
+    let started = project.run(&["guard", "--detach"]);
+    assert_eq!(code(&started), 0, "{}", stderr(&started));
+
+    let status = stdout(&project.run(&["status"]));
+    assert!(status.contains("guard      running"), "{status}");
+
+    // No `ralon run` anywhere: an ordinary process, started the ordinary way.
+    project.shell("echo hacked > .env");
+    project.shell("del /q .env");
+    project.shell("echo x > config\\new.yaml");
+    let held = fs::read_to_string(&secret).unwrap() == "SECRET=original\n"
+        && !project.root.join("config/new.yaml").exists();
+
+    // Released before asserting, so a failure does not leave a guard holding
+    // the directory this test is about to delete.
+    let stopped = project.run(&["guard", "--stop"]);
+    assert!(held, "a guarded path was modified by an unwrapped process");
+    assert_eq!(code(&stopped), 0, "{}", stderr(&stopped));
+
+    project.shell("echo released > .env");
+    assert!(fs::read_to_string(&secret).unwrap().contains("released"));
 }
 
 #[test]

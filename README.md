@@ -61,9 +61,8 @@ the two you are getting.
 ## Use
 
 ```console
-$ ralon init                   # write a starter agent.lock
-$ ralon hook install           # refuse the agent's edit tools (works everywhere)
-$ ralon status                 # what is protected, and what this kernel can enforce
+$ ralon init                   # write a starter agent.lock, and wire up the agents
+$ ralon status                 # what is protected, and what this machine can enforce
 $ ralon check src/auth.ts      # is this path protected? exits 1 if it is
 $ ralon check                  # list everything the policy protects right now
 $ ralon run --dry-run -- npm test    # what would be locked, without locking it
@@ -74,13 +73,45 @@ $ ralon run -- claude          # the real thing
 terminal, its exit code, and its signals. There is no supervisor process to kill
 and nothing to keep running in the background.
 
-### The hook
+### On Windows, start here
 
 ```console
-$ ralon hook install
+$ ralon init                   # policy + hooks
+$ notepad agent.lock           # say what must not change
+$ ralon guard --detach         # done — every process is refused those paths
+$ ralon guard --stop           # hand the files back when you want to edit them
 ```
 
-That writes a refusal into the configuration of **Claude Code**, **Cursor** and
+A guard holds the locks with no command to supervise. Windows refuses those
+locks to *every process*, so an agent started from an IDE, an extension,
+another terminal, or installed next month is refused without knowing Ralon
+exists — no `ralon run`, no configuration, nothing for the agent to opt into.
+`ralon status` says whether one is running.
+
+It refuses **writes to the paths you declared**, and nothing else. Reading is
+untouched, so your build, tests, dev server, editor and `git` carry on
+normally; everything outside the policy is untouched too. The only person it
+gets in the way of is you, when you want to edit a protected file — which is
+what `--stop` is for.
+
+There is no way to refuse *only* an LLM agent and no one else. A process
+carries no mark saying what it is, and agents write through `cmd`, `python`,
+`node` and `git` — the same binaries you use. The hook below is the closest
+thing, and it is defeatable for exactly that reason.
+
+This works on Windows and not on Linux, for one reason worth understanding:
+Windows enforcement is **held** by a process and applies to everyone else,
+while Linux enforcement is **inherited** by a process before it runs. Inherited
+is the stronger of the two — there is no supervisor to kill — but it cannot be
+imposed on a process you did not start. On Linux, `ralon run` is the answer,
+and `ralon guard` says so rather than pretending.
+
+### The hook
+
+`ralon init` installs this; `ralon hook install` does it on its own, and
+`--no-hooks` skips it.
+
+It writes a refusal into the configuration of **Claude Code**, **Cursor** and
 **OpenCode**, so those agents are turned away before they edit a protected
 path. `--agent` picks one. It works on every platform, including the ones where
 `run` cannot enforce anything — which is exactly where it matters most.
@@ -144,9 +175,10 @@ command starts, so `umount` and bind-mount tricks fail from inside.
 
 ### Where it stops
 
-- **Only what you launch.** A policy protects the processes started through
-  `ralon run`. An agent started some other way is not restricted — the
-  point is that you start it this way.
+- **Only what you launch** — unless a guard is running. A policy protects the
+  processes started through `ralon run`; on Windows, `ralon guard` covers the
+  rest of the machine as well, and on Linux an agent started some other way is
+  not restricted.
 - **Only what exists.** A protected path that is not on disk yet cannot be
   bind-mounted. `status` and `run` warn about patterns matching nothing. (Under
   the landlock backend such paths cannot be created at all, which is stricter.)
@@ -164,10 +196,19 @@ what is available, and `--backend mount|landlock|locks` pins the choice.
 **locks** (Windows) — Ralon holds every protected file open allowing readers
 and refusing writers, so writing, deleting, renaming or replacing one fails
 with a sharing violation, for every process on the machine. ACLs would not do:
-an agent runs as the same user, so any permission Ralon can set it can unset.
-Two limits: a *new* file created inside a protected directory is not covered,
-and the protection lasts as long as `run` does — the command is tied to a job
-object that dies with Ralon, so it cannot outlive the locks.
+an agent runs as the same user, so any permission Ralon can set it can unset. A
+handle is not a permission.
+
+The one thing a handle cannot express is "and nothing may be added here", since
+creating a file opens no existing object. That gap is covered by a deny ACE on
+protected directories while Ralon runs — a narrowing rather than a guarantee,
+because the agent owns the directory and an owner's `WRITE_DAC` cannot be
+denied. It refuses every ordinary create; `security.md` is explicit about what
+it does not refuse.
+
+The protection lasts as long as Ralon does. A command started by `run` is tied
+to a job object that dies with Ralon, so it cannot outlive the locks; a guard
+has no child to tie, so killing one releases them.
 
 **mount** (default) — read-only bind mounts inside a user + mount namespace,
 locked by entering a second namespace so they cannot be undone. Every parent

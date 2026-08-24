@@ -20,7 +20,58 @@ pub struct Finding {
 pub fn audit(root: &Path, protected: &[ProtectedPath]) -> Vec<Finding> {
     let mut findings = hard_links(protected);
     findings.extend(second_mounts(root));
+    findings.extend(already_open_for_writing(protected));
     findings
+}
+
+/// A protected file that something else already has open for writing.
+///
+/// Not a weakness in the policy — the opposite. It is a file that is *in use*:
+/// a live SQLite database, a log a dev server appends to, a state file some
+/// daemon rewrites. Protecting it either fails to take the lock, or takes it
+/// and breaks the program that was using it, and both look like Ralon
+/// misbehaving rather than like a policy naming the wrong thing.
+///
+/// Windows only, because it is the only platform here that can answer the
+/// question. Unix has no mandatory locking, so an open file for writing is
+/// indistinguishable from a closed one without walking every process.
+#[cfg(windows)]
+fn already_open_for_writing(protected: &[ProtectedPath]) -> Vec<Finding> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// The share mode enforcement itself will ask for. If this open is refused,
+    /// so is that one, and for the same reason.
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+
+    /// `ERROR_SHARING_VIOLATION` and `ERROR_LOCK_VIOLATION`. Only these two
+    /// mean "somebody else has it"; a missing file or a permissions problem is
+    /// a different complaint with a different answer.
+    const IN_USE: [i32; 2] = [32, 33];
+
+    protected
+        .iter()
+        .filter(|path| !path.is_dir)
+        .filter(|path| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(&path.absolute)
+                .err()
+                .and_then(|error| error.raw_os_error())
+                .is_some_and(|code| IN_USE.contains(&code))
+        })
+        .map(|path| Finding {
+            subject: path.relative.clone(),
+            detail: "is held open by another process, so it cannot be locked — protect \
+                     the files a program owns, not the ones it is using"
+                .to_string(),
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn already_open_for_writing(_protected: &[ProtectedPath]) -> Vec<Finding> {
+    Vec::new()
 }
 
 /// A protected file with more than one name.

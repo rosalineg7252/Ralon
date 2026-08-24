@@ -83,7 +83,9 @@ agent-independent. Do not rename the file after the tool.
       enforce/mod.rs               backend selection, Plan, ancestor pinning
       enforce/carve.rs             Landlock rule planning (pure, testable)
       enforce/linux/               mount.rs landlock.rs sys.rs — the syscalls
-      enforce/macos/ windows/      no backend yet; each documents its mechanism
+      enforce/windows/             locks.rs acl.rs job.rs guard.rs — the Win32 calls
+      enforce/macos/               no backend yet; documents the one it would use
+      enforce/unguarded.rs         "a guard cannot work here", and why
     tests/cli.rs                   CLI behaviour, every platform
     tests/enforcement.rs           real bypass attempts, Linux only
 
@@ -92,9 +94,17 @@ on a machine that cannot enforce it — so only syscalls live under a platform
 directory. A new platform is a new directory exposing `availability()` and
 `enforce_and_exec()`; a new agent is a new file in `hook/`.
 
-Commands: `ralon init | check | status | hook install | run`. `run` restricts the current
-process and then `execve`s the command, so the restriction is inherited by every
-descendant and there is no supervisor to bypass.
+Commands: `ralon init | check | status | hook install | guard | run`.
+
+`run` restricts the current process and then `execve`s the command, so the
+restriction is inherited by every descendant and there is no supervisor to
+bypass. `guard` is the Windows-only inverse: it holds the locks with no command
+to supervise, so it covers agents it did not start. That asymmetry is the
+mechanism, not an oversight — Windows locks are *held* by a process and refused
+to everyone else, Linux restrictions are *inherited* by a process and cannot be
+imposed on one you did not start. Neither replaces the other, and `init` starts
+neither: it writes a template nobody has edited yet, and a guard holding a
+snapshot of that would protect the wrong paths convincingly.
 
 Two Linux backends, `auto` prefers the first:
 
@@ -125,6 +135,10 @@ the tested limitations, `publishing.md` for release steps.
   container; without it only Landlock is exercised.)
 - A new bypass gets a failing test in `tests/enforcement.rs` first. The attack
   tables there are one line per attack and run against every available backend.
+- **Assert on the filesystem, never on an exit code.** `del` returns 0 when it
+  failed, `>` returns 0 when it was refused, and `SetEntriesInAcl` returned
+  `ERROR_SUCCESS` while changing nothing. Two bugs here were "attack refused"
+  reported by a check that never looked at the file. Read the file back.
 - Never let a failure to enforce be silent. If no backend is available, `run`
   refuses to start the command rather than running it unprotected — and says
   what to do instead, because "unavailable" on its own lets the reader conclude

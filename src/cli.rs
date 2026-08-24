@@ -22,11 +22,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Write a starter agent.lock
+    /// Write a starter agent.lock and wire up the agents
     Init {
         /// Overwrite an existing agent.lock
         #[arg(long)]
         force: bool,
+
+        /// Write the policy only, and configure nothing
+        #[arg(long)]
+        no_hooks: bool,
     },
 
     /// Report what the policy protects, or whether given paths are protected
@@ -51,6 +55,28 @@ pub enum Command {
     Hook {
         #[command(subcommand)]
         action: HookAction,
+    },
+
+    /// Protect the project against every process, with no command to wrap
+    ///
+    /// `run` protects the agent it starts. A guard protects the ones it does
+    /// not: it holds the locks itself, and Windows refuses those to every
+    /// process on the machine, so an agent started from anywhere — a terminal,
+    /// an IDE, an extension, one installed next month — is refused without
+    /// knowing Ralon exists. Start it once and stop it with `--stop`.
+    Guard {
+        /// Keep running after this terminal closes
+        #[arg(long, conflicts_with = "stop")]
+        detach: bool,
+
+        /// Release a running guard and clear anything it left behind
+        #[arg(long)]
+        stop: bool,
+
+        /// This *is* the background guard `--detach` started. Not for people:
+        /// it means "you have no console, do not try to write to one".
+        #[arg(long, hide = true, conflicts_with_all = ["detach", "stop"])]
+        detached: bool,
     },
 
     /// Run a command that cannot modify the protected paths

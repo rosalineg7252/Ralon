@@ -24,10 +24,16 @@
 //!   locks — so the command is put in a job object that dies with Ralon, and
 //!   killing Ralon kills the command with it. Verified: with the supervisor
 //!   terminated mid-run, the command never reached its write.
-//! - A protected **directory** keeps every existing file inside it locked and
-//!   cannot itself be renamed or removed, but a *new* file created inside it is
-//!   not covered — verified, and the one gap the Linux backends do not have.
+//! - A protected **directory** cannot be renamed or removed and every file
+//!   inside it is locked in its own right, but creating a *new* entry inside
+//!   opens no existing object, so no share mode is ever consulted. A handle
+//!   cannot express "and nothing may be added here". A deny ACE can, and
+//!   `acl.rs` adds one — with the caveat that an agent owning the directory can
+//!   rewrite it, which is why it is described as a narrowing and the handles
+//!   are not.
 
+mod acl;
+pub mod guard;
 mod job;
 mod locks;
 
@@ -49,7 +55,8 @@ pub fn availability() -> Vec<(Backend, Availability)> {
         (
             Backend::Locks,
             Availability::Available {
-                detail: "exclusive share-mode handles, held for the life of the command"
+                detail: "exclusive share-mode handles, refused to every process for as \
+                         long as Ralon holds them"
                     .to_string(),
             },
         ),
@@ -63,6 +70,18 @@ pub fn enforce_and_exec(plan: &Plan, command: &[OsString]) -> Result<ExitCode> {
 
     // Taken before the command starts: if a path cannot be locked, nothing runs.
     let held = locks::acquire(&plan.pinned, &plan.protected)?;
+
+    // The handles cover everything that exists. This covers what does not yet.
+    let protected_directories: Vec<_> = plan
+        .protected
+        .iter()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .collect();
+    let (narrowed, warnings) = acl::refuse_new_entries(&protected_directories);
+    for warning in &warnings {
+        eprintln!("ralon: warning: {warning}");
+    }
 
     let mut child = Command::new(program)
         .args(arguments)
@@ -86,6 +105,7 @@ pub fn enforce_and_exec(plan: &Plan, command: &[OsString]) -> Result<ExitCode> {
     // Explicit, so the handles outlive the child rather than being dropped
     // early by an optimiser or a future edit that moves things around.
     drop(leash);
+    drop(narrowed);
     drop(held);
 
     // The command's own status, as on every other platform.

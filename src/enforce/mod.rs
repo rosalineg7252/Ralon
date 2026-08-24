@@ -38,9 +38,9 @@ pub enum Backend {
     /// this file", so directories leading to a protected path become
     /// create-restricted.
     Landlock,
-    /// Windows: exclusive share-mode handles held for the life of the command.
-    /// Blocks every process rather than every agent, and lasts exactly as long
-    /// as `run` does.
+    /// Windows: exclusive share-mode handles. Blocks every process rather than
+    /// every agent, and lasts exactly as long as the process holding them —
+    /// `run` for the life of the command, `guard` until it is stopped.
     Locks,
 }
 
@@ -142,15 +142,38 @@ pub fn availability() -> Vec<(Backend, Availability)> {
     platform::availability()
 }
 
+// Holding a policy open with no command to supervise. Only Windows can: its
+// locks are held by a process and refuse *everyone else*, so one process
+// sitting in the background protects the files against every agent however it
+// was started. The Linux mechanisms are the mirror image — they restrict the
+// process tree they are applied to, which is far stronger for anything started
+// through `run` and worth nothing for anything that was not. The mechanisms
+// that would restrict a process you did not start (`chattr +i`, fanotify
+// permission events) all need privileges Ralon should not be asking for.
+#[cfg(target_os = "windows")]
+pub use platform::guard;
+
+#[cfg(not(target_os = "windows"))]
+#[path = "unguarded.rs"]
+pub mod guard;
+
 /// Resolves `Backend::Auto` against what the kernel actually offers.
 pub fn resolve(requested: Backend) -> Result<Backend> {
     let availability = availability();
+    // A platform reports only the backends that mean something on it: `locks`
+    // is a Windows idea, `mount` and `landlock` are Linux ones. Anything it
+    // does not mention is simply not a thing here.
     let find = |backend: Backend| {
         availability
             .iter()
             .find(|(candidate, _)| *candidate == backend)
             .map(|(_, status)| status.clone())
-            .expect("every backend is reported")
+            .unwrap_or(Availability::Unavailable {
+                reason: format!(
+                    "the {backend} backend does not exist on {}",
+                    std::env::consts::OS
+                ),
+            })
     };
 
     match requested {

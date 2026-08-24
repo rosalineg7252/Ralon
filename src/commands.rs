@@ -21,7 +21,7 @@ pub const VIOLATION: u8 = 1;
 /// as "blocked"; Cursor treats any other non-zero code as fail-open.
 pub const BLOCKED: u8 = 2;
 
-pub fn init(directory: &Path, force: bool) -> Result<ExitCode> {
+pub fn init(directory: &Path, force: bool, no_hooks: bool) -> Result<ExitCode> {
     let target = directory.join(POLICY_FILE);
     if target.exists() && !force {
         bail!(
@@ -31,7 +31,98 @@ pub fn init(directory: &Path, force: bool) -> Result<ExitCode> {
     }
     std::fs::write(&target, policy::TEMPLATE)?;
     println!("wrote {}", target.display());
-    println!("edit it, then run: ralon run -- <your agent>");
+
+    // Hooks are configuration, not a process: writing them here costs the user
+    // nothing and means the agents that *can* be told about the policy already
+    // have been. What `init` deliberately does not do is start anything — the
+    // policy it just wrote is a template nobody has edited yet, and a guard
+    // holding a snapshot of it would protect the wrong paths convincingly.
+    if !no_hooks {
+        for entry in hook::install_for(directory, Agent::All, false)? {
+            println!(
+                "{} {}",
+                if entry.replaced { "updated" } else { "wrote" },
+                entry.path.display()
+            );
+        }
+    }
+
+    println!();
+    println!("Now edit {POLICY_FILE}, then protect it:");
+    if enforce::guard::AVAILABLE {
+        println!("  ralon guard --detach   every process on this machine is refused");
+        println!("  ralon guard --stop     hand the files back");
+    } else {
+        println!("  ralon run -- <your agent>   the agent and everything it spawns");
+    }
+    Ok(ExitCode::from(OK))
+}
+
+/// Holds the policy open with no command to supervise.
+pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Result<ExitCode> {
+    // Before anything that might print: this process has no console, and Rust
+    // panics rather than shrugging when a write to one fails.
+    if detached {
+        enforce::guard::silence_standard_handles();
+    }
+
+    let policy = Policy::load(directory)?;
+    let matcher = Matcher::new(&policy.patterns)?;
+    let found = scan::scan(&policy.root, &matcher)?;
+    let protected = scan::canonical_targets(&found)?;
+    let root = std::fs::canonicalize(&policy.root)?;
+
+    if stop {
+        let stopped = enforce::guard::stop(&root)?;
+        // Cleared whether or not one was running: a guard that was killed
+        // rather than stopped leaves its ACL narrowing behind, and this is
+        // where that gets tidied up.
+        let cleared = enforce::guard::clear_leftovers(&protected);
+
+        if stopped {
+            println!("guard released — the protected paths are writable again");
+        } else {
+            println!("no guard was running for {}", root.display());
+        }
+        for directory in cleared {
+            println!("cleared    {}", directory.display());
+        }
+        return Ok(ExitCode::from(OK));
+    }
+
+    if detach {
+        enforce::guard::detach(&root)?;
+        println!("guard running in the background for {}", root.display());
+        println!("every process on this machine is now refused those paths");
+        println!("stop it with: ralon guard --stop");
+        return Ok(ExitCode::from(OK));
+    }
+
+    // Off Windows there is no backend to resolve and `start` explains why, so
+    // resolution is skipped rather than failing with the wrong message.
+    let backend = if enforce::guard::AVAILABLE {
+        enforce::resolve(Backend::Auto)?
+    } else {
+        Backend::Auto
+    };
+    let plan = Plan::build(backend, &root, protected);
+    let session = enforce::guard::start(&root, &plan)?;
+
+    eprintln!(
+        "ralon: {} locked, {} pinned, {} refusing new files",
+        count(session.files(), "file", "files"),
+        count(session.directories(), "directory", "directories"),
+        count(session.refused_directories(), "directory", "directories"),
+    );
+    for warning in &session.warnings {
+        eprintln!("ralon: warning: {warning}");
+    }
+    warn_about_unmatched(&policy, &found);
+    warn_about_weaknesses(&policy, &found);
+    eprintln!("ralon: guarding — Ctrl-C, or `ralon guard --stop`, to release");
+
+    session.park()?;
+    eprintln!("ralon: released");
     Ok(ExitCode::from(OK))
 }
 
@@ -99,6 +190,10 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
     let availability = enforce::availability();
     for (backend, status) in &availability {
         println!("  {backend:<9}{status}");
+    }
+
+    if enforce::guard::AVAILABLE {
+        report_guard(&policy, &found);
     }
 
     // "unavailable" states a fact and leaves the wrong conclusion available:
@@ -267,6 +362,40 @@ fn count(amount: usize, singular: &str, plural: &str) -> String {
     } else {
         format!("{amount} {plural}")
     }
+}
+
+/// Whether a guard is holding this project, and whether a dead one left
+/// anything behind.
+///
+/// Both halves matter. "A guard is running" is the only way to know the
+/// protection is real without a wrapper command to point at, and a leftover
+/// ACL is a directory that refuses new files with nothing running to explain
+/// why — a mystery worth naming before someone spends an afternoon on it.
+fn report_guard(policy: &Policy, found: &[ProtectedPath]) {
+    let Ok(root) = std::fs::canonicalize(&policy.root) else {
+        return;
+    };
+
+    if enforce::guard::running(&root) {
+        println!("guard      running — every process on this machine is refused those paths");
+    } else {
+        println!("guard      not running (`ralon guard --detach`)");
+    }
+
+    let Ok(protected) = scan::canonical_targets(found) else {
+        return;
+    };
+    let leftovers = enforce::guard::leftovers(&protected);
+    if leftovers.is_empty() || enforce::guard::running(&root) {
+        return;
+    }
+    println!();
+    println!("These directories still refuse new files from a guard that was killed");
+    println!("rather than stopped. That fails closed, which is the safe direction:");
+    for directory in leftovers {
+        println!("  {}", directory.display());
+    }
+    println!("  ralon guard --stop    clear it");
 }
 
 /// Conditions that weaken the policy without breaking it. Printed before the

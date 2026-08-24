@@ -50,9 +50,14 @@ fn dispatch() -> Result<ExitCode> {
     };
 
     match cli.command {
-        Command::Init { force } => commands::init(&directory, force),
+        Command::Init { force, no_hooks } => commands::init(&directory, force, no_hooks),
         Command::Check { paths } => commands::check(&directory, &paths),
         Command::Status => commands::status(&directory),
+        Command::Guard {
+            detach,
+            stop,
+            detached,
+        } => commands::guard(&directory, detach, stop, detached),
         Command::Hook { action } => match action {
             HookAction::Install { agent, dry_run } => {
                 commands::hook_install(&directory, agent, dry_run)

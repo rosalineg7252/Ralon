@@ -29,10 +29,38 @@ Windows with real enforcement, and everywhere else by saying so plainly.
   same user, so any permission Ralon can set it can unset. A handle is not a
   permission.
 
-  Two limits, documented in `security.md` and both tested: a *new* file created
-  inside a protected directory is not covered, and the protection lasts only as
-  long as `run` — so the command is placed in a job object that dies with
-  Ralon, closing the "kill the supervisor and keep writing" hole.
+  The protection lasts only as long as `run`, so the command is placed in a job
+  object that dies with Ralon, closing the "kill the supervisor and keep
+  writing" hole.
+- **`ralon guard` — protection with no command to wrap.** `run` protects the
+  agent it starts; a guard protects the ones it does not. It holds the same
+  locks with nothing to supervise, and Windows refuses them to every process on
+  the machine, so an agent launched from an IDE, an extension, another
+  terminal, or installed next month is refused without knowing Ralon exists.
+  `--detach` to leave one running, `--stop` to hand the files back, and
+  `status` says which. Verified against unwrapped `cmd.exe`: overwrite, append,
+  delete, rename, writing a protected file, rewriting the policy, and creating
+  a new file in a protected directory — all refused, with no `ralon run`
+  anywhere.
+
+  This is possible on Windows precisely because its locks are *held* rather
+  than inherited, and impossible on Linux for the same reason in reverse: a
+  Landlock domain is applied to a process before it runs and cannot be imposed
+  on one you did not start. `ralon guard` on Linux says that instead of
+  pretending.
+- **New files inside a protected directory are refused.** The gap the handles
+  could not reach — creating an entry opens no existing object, so no share
+  mode applies — is closed with a deny ACE, covering create, `mkdir`, copying
+  or moving a file in, and renaming one inside. It is a *narrowing*, not a
+  guarantee, and `security.md` is explicit about why: the agent owns the
+  directory and an owner's `WRITE_DAC` cannot be denied, tested. Every ordinary
+  create is refused; an agent that rewrites the ACL gets its write.
+
+  The ACE is removed on exit. If Ralon is killed it stays, which fails closed;
+  `status` reports it and `ralon guard --stop` clears it.
+- `ralon init` now installs the agent hooks as well as writing the policy
+  (`--no-hooks` to skip), and points at the one command that protects the
+  project rather than leaving the reader to find it.
 - **`ralon hook install`** — wires a refusal into an agent's own configuration
   instead of leaving each user to hand-write JSON. Covers **Claude Code**
   (`.claude/settings.json`), **Cursor** (`.cursor/hooks.json`) and **OpenCode**
@@ -48,7 +76,11 @@ Windows with real enforcement, and everywhere else by saying so plainly.
   already covers Codex, Antigravity, GLM, Gemini and anything shipped next
   year, hooks or no hooks.
 - **An audit that runs before the agent does.** `status` and `run` now report
-  conditions that weaken a policy without breaking it.
+  conditions that weaken a policy without breaking it — and, on Windows, one
+  that means the policy is naming the wrong thing: a protected file another
+  program already holds open, such as a live database or a log a dev server
+  appends to. It cannot be locked, so `status` warns and `run` refuses to start
+  rather than reporting it as protected while it is not.
 
 ### Security
 
