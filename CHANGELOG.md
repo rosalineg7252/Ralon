@@ -4,6 +4,20 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## 0.1.3
+
+### Fixed
+
+- **`npm install ralonlock` was unusable in 0.1.2**: every invocation failed
+  with `EACCES`. GitHub Actions artifacts do not preserve file permissions, so
+  the npm job packed a binary with the executable bit already stripped. The
+  packager now sets it explicitly, and the shim repairs an install that has the
+  problem instead of failing. Only npm was affected — the release archives are
+  built where the binary is compiled, and the wheels set the mode themselves.
+- `dist/` and `artifacts/` are ignored by git and excluded from the crate
+  tarball. Packager output had been committed, and would have shipped to
+  `cargo install` users.
+
 ## 0.1.2
 
 The first release to reach npm and PyPI. No change to what Ralon does: `0.1.1`

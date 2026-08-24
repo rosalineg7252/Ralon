@@ -43,13 +43,32 @@ if (found.error) {
   process.exit(2);
 }
 
-const result = spawnSync(found.path, process.argv.slice(2), {
-  stdio: "inherit",
-  windowsHide: true,
-});
+function run() {
+  return spawnSync(found.path, process.argv.slice(2), {
+    stdio: "inherit",
+    windowsHide: true,
+  });
+}
+
+let result = run();
+
+// An install that lost the executable bit — the packaging used to publish 0644
+// binaries — is recoverable in place, and a hard failure here would leave the
+// package unusable until the next release.
+if (result.error && result.error.code === "EACCES") {
+  try {
+    require("node:fs").chmodSync(found.path, 0o755);
+    result = run();
+  } catch {
+    // Fall through to the original error below.
+  }
+}
 
 if (result.error) {
-  console.error(`ralon: ${result.error.message}`);
+  console.error(`ralon: cannot run ${found.path}: ${result.error.message}`);
+  if (result.error.code === "EACCES") {
+    console.error("ralon: try `chmod +x` on that file, or reinstall");
+  }
   process.exit(2);
 }
 // Killed by a signal: report it the way a shell would.

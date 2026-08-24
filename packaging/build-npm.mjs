@@ -8,7 +8,14 @@
 // carrying a binary) and dist/ralon (the package users install, whose
 // optionalDependencies point at them). npm then installs only the one whose
 // os/cpu match.
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  copyFileSync,
+  chmodSync,
+  existsSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -58,7 +65,12 @@ for (const [target, spec] of Object.entries(targets)) {
 
   const directory = join(out, "platforms", spec.npm);
   mkdirSync(join(directory, "bin"), { recursive: true });
-  copyFileSync(source, join(directory, "bin", executable));
+  const destination = join(directory, "bin", executable);
+  copyFileSync(source, destination);
+  // GitHub Actions artifacts do not preserve permissions, so a binary that
+  // arrived through one is 0644 and npm packs exactly what it is given. Users
+  // then get EACCES on every invocation.
+  chmodSync(destination, 0o755);
 
   writeFileSync(
     join(directory, "package.json"),
