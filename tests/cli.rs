@@ -404,34 +404,41 @@ fn windows_guard_protects_a_process_it_did_not_start() {
     assert!(fs::read_to_string(&secret).unwrap().contains("released"));
 }
 
+/// A failure to enforce is never silent, and never partial: if the requested
+/// backend cannot be applied, the command does not start at all.
+///
+/// This used to run only where *no* backend existed, which meant it stopped
+/// testing anything the moment macOS gained one — and it failed by trying to
+/// launch a Windows shell on a Mac. Asking for a backend that cannot exist on
+/// this platform tests the same refusal, and every platform has one of those.
 #[test]
-fn run_refuses_rather_than_running_unprotected_where_it_cannot_enforce() {
-    // Every platform with a backend enforces instead; this is about the ones
-    // without, which must never start the command.
-    if cfg!(target_os = "linux") || cfg!(windows) {
-        return;
-    }
+fn run_refuses_rather_than_running_unprotected_when_the_backend_is_unavailable() {
     let project = Project::new(Some(POLICY));
     project.write("src/index.tsx", "locked\n");
 
+    // `locks` is a Windows idea; `mount` is a Linux one. Neither exists on the
+    // other platforms, and `resolve` has to say so rather than panicking on a
+    // backend its own table does not list.
+    let elsewhere = if cfg!(target_os = "linux") {
+        "locks"
+    } else {
+        "mount"
+    };
+
     let marker = project.root.join("should-not-exist.txt");
-    let output = project.run(&[
-        "run",
-        "--",
-        "cmd",
-        "/c",
-        &format!("type nul > {}", marker.display()),
-    ]);
+    let (shell, flag, script) = if cfg!(windows) {
+        ("cmd", "/c", format!("type nul > {}", marker.display()))
+    } else {
+        ("sh", "-c", format!("touch '{}'", marker.display()))
+    };
+
+    let output = project.run(&["run", "--backend", elsewhere, "--", shell, flag, &script]);
 
     assert_eq!(code(&output), 2, "{}", stdout(&output));
+    // The refusal has to say what is missing, or the reader concludes the
+    // policy is protecting them when nothing is.
     let explanation = stderr(&output);
-    // The refusal has to say what is missing *and* what to do instead, or the
-    // reader concludes the policy is protecting them when nothing is.
-    assert!(
-        explanation.contains("no enforcement backend is available"),
-        "{explanation}"
-    );
-    assert!(explanation.contains("hook install"), "{explanation}");
+    assert!(explanation.contains("unavailable"), "{explanation}");
     assert!(!marker.exists(), "the command must not have run");
 }
 

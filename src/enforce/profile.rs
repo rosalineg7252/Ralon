@@ -71,10 +71,20 @@ pub fn build(protected: &[PathBuf], pinned: &[PathBuf], is_directory: &IsDirecto
         .collect();
 
     if !ancestors.is_empty() {
+        // `file-write-unlink`, not `file-write*`. The attack being closed is
+        // renaming or removing the directory, and both are an unlink of this
+        // exact path — while creating a file *inside* it is an operation on a
+        // different path entirely, so it stays allowed.
+        //
+        // The broader rule would also work if Seatbelt only ever checks the
+        // path being written. If it consults the parent as well, the broader
+        // rule silently turns the whole project read-only, which is the kind of
+        // failure nobody notices until they try to work. The narrow rule cannot
+        // do that, and gives up nothing this policy needs.
         text.push_str(
-            "\n; The directories leading to them: these deny the directory node\n\
-             ; itself, so it cannot be renamed or removed, while leaving what is\n\
-             ; inside it writable.\n(deny file-write*\n",
+            "\n; The directories leading to them. Only unlink: they cannot be\n\
+             ; renamed or removed, and everything inside them stays writable.\n\
+             (deny file-write-unlink\n",
         );
         text.push_str(&ancestors.join("\n"));
         text.push_str("\n)\n");
@@ -138,6 +148,28 @@ mod tests {
         assert!(text.contains("(literal \"/p/src\")"), "{text}");
         assert!(!text.contains("(subpath \"/p/src\")"), "{text}");
         assert!(!text.contains("(subpath \"/p\")"), "{text}");
+    }
+
+    /// Ancestors get `file-write-unlink`, never `file-write*`. The wide rule
+    /// would stop the directory being renamed *and* — if Seatbelt consults the
+    /// parent when creating a child — stop anything being written in the
+    /// project at all.
+    #[test]
+    fn ancestors_deny_only_unlink() {
+        let text = build(
+            &[PathBuf::from("/p/src/index.tsx")],
+            &[PathBuf::from("/p"), PathBuf::from("/p/src")],
+            &directories(&["/p", "/p/src"]),
+        );
+
+        let ancestors = text
+            .split("(deny ")
+            .find(|block| block.contains("\"/p/src\"") && !block.contains("index.tsx"))
+            .expect("the ancestor block should exist");
+        assert!(ancestors.starts_with("file-write-unlink"), "{text}");
+
+        // And the protected file itself still gets the whole write set.
+        assert!(text.contains("(deny file-write*"), "{text}");
     }
 
     #[test]
