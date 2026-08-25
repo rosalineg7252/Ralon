@@ -55,7 +55,35 @@ pub fn init(directory: &Path, force: bool, no_hooks: bool) -> Result<ExitCode> {
     } else {
         println!("  ralon run -- <your agent>   the agent and everything it spawns");
     }
+    println!();
+    print_what_a_refusal_looks_like();
+    println!();
+    println!("If this is useful, a star helps other people find it:");
+    println!("  https://github.com/stoneware-dev/Ralon");
     Ok(ExitCode::from(OK))
+}
+
+/// Says in advance what enforcement looks like from the other side.
+///
+/// The hook is the only refusal whose wording belongs to Ralon. Everywhere else
+/// the message is made by whatever the agent writes with, from an error code
+/// Ralon caused but does not own — Node renders a Windows sharing violation as
+/// `EBUSY: resource busy or locked`, which reads like a corrupt file rather
+/// than a policy. There is no interception point that would fix that, so the
+/// remaining honest move is to tell the developer beforehand, once, that the
+/// confusing error is the tool working.
+fn print_what_a_refusal_looks_like() {
+    let errors = if cfg!(windows) {
+        "`EBUSY: resource busy or locked`, or `Access is denied`"
+    } else if cfg!(target_os = "macos") {
+        "`EPERM: operation not permitted`"
+    } else {
+        "`EROFS: read-only file system`, or `EACCES: permission denied`"
+    };
+    println!("An agent that reaches a protected path reports");
+    println!("  {errors}");
+    println!("which is Ralon refusing the write, not a damaged file. Agents with a");
+    println!("hook installed are told that in words instead.");
 }
 
 /// Holds the policy open with no command to supervise.
@@ -95,6 +123,8 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
         println!("guard running in the background for {}", root.display());
         println!("every process on this machine is now refused those paths");
         println!("stop it with: ralon guard --stop");
+        println!();
+        print_what_a_refusal_looks_like();
         return Ok(ExitCode::from(OK));
     }
 

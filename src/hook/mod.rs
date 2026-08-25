@@ -383,8 +383,16 @@ pub fn decide(request: &str, start: &Path) -> Result<Decision> {
 
         if let Some(pattern) = matcher.matched_pattern(&relative) {
             return Ok(Decision::Deny {
+                // "Protected by Ralon" rather than the error the filesystem
+                // would have produced. This is the one refusal whose wording is
+                // ours: without a hook the agent reports whatever its runtime
+                // makes of the OS error — Node turns a sharing violation into
+                // `EBUSY: resource busy or locked` — which reads as a broken
+                // file rather than a policy, and sends the agent looking for a
+                // way around it.
                 reason: format!(
-                    "{relative} is protected by agent.lock (matches `{pattern}`). \
+                    "{relative} is protected by Ralon — it is listed in agent.lock \
+                     (matches `{pattern}`), so writes to it are refused. \
                      Edit something else, or ask the developer to change the policy — \
                      you cannot change it yourself."
                 ),

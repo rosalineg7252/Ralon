@@ -4,6 +4,30 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## 0.1.5
+
+Enforcement is not the only thing that has to be legible. When Ralon refuses a
+write, the message the developer or the agent actually reads is produced by
+whatever attempted it — and `EBUSY: resource busy or locked` reads like a
+corrupt file, not a policy. This release fixes the wording where Ralon owns it
+and warns about it where Ralon does not.
+
+### Changed
+
+- **The hook now says "protected by Ralon"** rather than naming only the file
+  it came from. This is the one refusal whose wording belongs to Ralon: without
+  a hook the agent reports whatever its runtime made of the OS error — Node
+  renders a Windows sharing violation as `EBUSY: resource busy or locked` —
+  which reads as a broken file and sends the agent looking for a way around it
+  rather than for something else to edit.
+- **`init` and `guard --detach` say in advance what a refusal looks like**, in
+  the spelling of the platform they are running on: `EBUSY` and `Access is
+  denied` on Windows, `EPERM` on macOS, `EROFS` and `EACCES` on Linux. There is
+  no interception point that would let Ralon rewrite those messages, so the
+  honest move is to say once, before it happens, that the confusing error is
+  the tool working.
+- `init` closes with a link to the repository.
+
 ## 0.1.4
 
 Ralon used to install cleanly on Windows and macOS, write a policy that looked
