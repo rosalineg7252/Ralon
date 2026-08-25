@@ -270,6 +270,9 @@ affected.
 
 Otherwise `run` exits with your command's own status.
 
+## EXAMPLE
+![alt text](image.png)
+
 ## Documentation
 
 - [`DESIGN.md`](DESIGN.md) — **start here.** The pipeline, the two process
