@@ -14,6 +14,7 @@
 //! and a Ralon that asked for it would be handing an agent something better to
 //! attack than the files it is guarding.
 
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -26,6 +27,24 @@ pub const SUPPORTED: bool = true;
 /// Shown in Task Scheduler, and the handle for `/Delete`.
 const TASK: &str = "Ralon Supervisor";
 
+/// `CREATE_NO_WINDOW`.
+///
+/// `schtasks` is a console program, and a console program inherits its parent's
+/// console — *unless the parent has not got one*, in which case Windows gives it
+/// a fresh one, visible, in the middle of the screen. Every caller here happens
+/// to run from a terminal today, so this changes nothing today; it stops a
+/// window appearing the first time one of them is called from the supervisor, a
+/// service, or anything else without a console of its own. The output is
+/// captured either way.
+const NO_WINDOW: u32 = 0x0800_0000;
+
+/// `schtasks` with the arguments given, and no window under any circumstances.
+fn schtasks(arguments: &[&str]) -> Command {
+    let mut command = Command::new("schtasks");
+    command.args(arguments).creation_flags(NO_WINDOW);
+    command
+}
+
 pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
     let user = account();
     let xml = describe_task(executable, home, &user);
@@ -37,8 +56,7 @@ pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
     std::fs::write(&path, utf16(&xml))
         .with_context(|| format!("failed to write {}", path.display()))?;
 
-    let created = Command::new("schtasks")
-        .args(["/Create", "/TN", TASK, "/XML"])
+    let created = schtasks(&["/Create", "/TN", TASK, "/XML"])
         .arg(&path)
         .arg("/F")
         .output()
@@ -56,8 +74,7 @@ pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
     // developer who just ran `ralon install` is owed enforcement now rather
     // than after a reboot.
     let mut warnings = Vec::new();
-    let started = Command::new("schtasks")
-        .args(["/Run", "/TN", TASK])
+    let started = schtasks(&["/Run", "/TN", TASK])
         .output()
         .context("failed to run schtasks")?;
     if !started.status.success() {
@@ -82,12 +99,9 @@ pub fn uninstall() -> Result<bool> {
     // Ends the running instance first. Deleting a task does not stop it, and a
     // supervisor left running with no registration is the one state nothing
     // would ever report.
-    let _ = Command::new("schtasks")
-        .args(["/End", "/TN", TASK])
-        .output();
+    let _ = schtasks(&["/End", "/TN", TASK]).output();
 
-    let removed = Command::new("schtasks")
-        .args(["/Delete", "/TN", TASK, "/F"])
+    let removed = schtasks(&["/Delete", "/TN", TASK, "/F"])
         .output()
         .context("failed to run schtasks")?;
     if !removed.status.success() {
@@ -100,8 +114,9 @@ pub fn uninstall() -> Result<bool> {
 }
 
 pub fn installed() -> bool {
-    Command::new("schtasks")
-        .args(["/Query", "/TN", TASK])
+    // Called by `ralon status`, which an agent runs through its shell often
+    // enough that a window here would be noticed.
+    schtasks(&["/Query", "/TN", TASK])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)

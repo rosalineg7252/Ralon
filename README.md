@@ -42,7 +42,7 @@ $ ralon run -- claude
 ralon: 5 paths locked via the mount backend
 ```
 
-```
+```text
 .gitignore  → what Git must not track
 agent.lock  → what AI-controlled processes must not modify
 ```
@@ -151,7 +151,7 @@ passes a megabyte.
 
 ## Two ways to enforce
 
-|  | `ralon install` (a supervisor) | `ralon run -- <agent>` |
+| | `ralon install` (a supervisor) | `ralon run -- <agent>` |
 | --- | --- | --- |
 | Covers | every process on the machine | the command, and everything it spawns |
 | Applies to agents you did not start | yes | no |
@@ -228,6 +228,7 @@ defeatable for exactly that reason.
 | `agent.lock` is malformed | That project is not enforced, and says so: `ralon status` exits 2 and names the line. Nothing is half-applied, and a policy that cannot be read locks nothing rather than locking everything. |
 | The project is outside every declared scope | Not enforced. `ralon status` says so and prints the `--scope` that would fix it. |
 | The agent hook is missing | Still enforced — the agent just sees the filesystem's own error (`EBUSY`, `Access is denied`, `EPERM`) rather than being told why. `ralon hook install` fixes it. |
+| A console window flashes on Windows when the agent edits a file | Your agent is spawning `ralon hook check` without hiding the window — a spawn flag Ralon does not control. Nothing Ralon starts in the background has a window: the supervisor's console is headless and guards are created detached. `ralon install --no-hooks`, or `ralon hook install --agent <one>`, reduces how often it is spawned; enforcement is unaffected either way. |
 | `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |
 
 `ralon status` answers "is the supervisor registered", "is it running" and "is
@@ -420,7 +421,8 @@ affected.
 Otherwise `run` exits with your command's own status.
 
 ## EXAMPLE
-![alt text](image.png)
+
+![A Claude Code session refusing to modify a protected file](image.png)
 
 ## Documentation
 

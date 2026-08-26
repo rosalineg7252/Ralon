@@ -99,18 +99,31 @@ const READ_ONLY_TOOLS: &[&str] = &[
 /// locked` and conclude the repository was broken. Four files, four chances to
 /// forget a spelling, and the failure is silent every time.
 ///
-/// So the matcher is built from verbs rather than product names, and shared. It
-/// is deliberately over-broad: matching a tool that turns out to touch nothing
-/// protected costs one process that answers "allow", while missing one costs the
-/// entire reason the hook exists.
+/// So the matcher is built from verbs rather than product names, and shared.
+///
+/// Every verb here is one some agent's real writing tool contains. That bar is
+/// deliberate, because the matcher decides the *message* and not the
+/// *protection*: a write the hook never sees is still refused by the kernel, and
+/// all that is lost is Ralon getting to say why. Meanwhile every tool call the
+/// matcher accepts costs a process — and on Windows, in some terminal hosts, a
+/// console window that flashes and goes. An earlier version of this list also
+/// carried `apply`, `save`, `modify`, `append`, `mkdir` and `touch`, which
+/// matched no agent tool that `patch` and the rest did not already cover, and
+/// did match a great many MCP tools (`save_memory`, `update_page`, `modify_*`)
+/// that touch no file at all. Speculating cost something visible and bought
+/// nothing.
 ///
 /// `bash`, `shell`, `run` and `exec` are still absent, and still on purpose — a
 /// hook cannot tell which paths an arbitrary command will touch, and a matcher
 /// that pretended otherwise would give false confidence. That gap is closed by
 /// enforcement, not by this.
 const WRITE_VERBS: &[&str] = &[
-    "write", "edit", "create", "replace", "patch", "insert", "delete", "remove", "update",
-    "modify", "append", "rename", "move", "apply", "save", "mkdir", "touch",
+    // Write, write_file, write_to_file · Edit, MultiEdit, NotebookEdit,
+    // edit_file · create_file · replace, replace_file_content,
+    // str_replace_editor · apply_patch · insert_edit_into_file · Update
+    "write", "edit", "create", "replace", "patch", "insert", "update",
+    // delete_file · remove_file · rename_file · move_file
+    "delete", "remove", "rename", "move",
 ];
 
 /// `WRITE_VERBS` as a regex alternation that matches either case.
@@ -766,7 +779,6 @@ mod tests {
             "delete_file",
             "move_file",
             "rename_file",
-            "save_file",
         ] {
             assert!(
                 matcher_accepts(tool),
@@ -784,6 +796,27 @@ mod tests {
             assert!(
                 !matcher_accepts(tool),
                 "`{tool}` would fire the hook, which claims a guarantee it has not got"
+            );
+        }
+    }
+
+    #[test]
+    fn the_matcher_does_not_fire_on_tools_that_touch_no_file() {
+        // The other half of the trade-off. Each of these would cost a process —
+        // and on Windows sometimes a console window that flashes — on every
+        // call, to be told the tool touches nothing protected. They are the
+        // reason the verb list is limited to spellings a real agent tool uses
+        // rather than every word that sounds like writing.
+        for tool in [
+            "save_memory",
+            "modify_settings",
+            "append_to_log",
+            "mkdir_remote",
+            "touch_record",
+        ] {
+            assert!(
+                !matcher_accepts(tool),
+                "`{tool}` fires the hook for nothing"
             );
         }
     }

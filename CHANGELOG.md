@@ -78,6 +78,19 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   supported agents are known to have — with a test that pins them. `Bash` and
   friends are still excluded, still deliberately: a hook cannot tell which paths
   a shell command will touch.
+- **The shared matcher was broader than it needed to be**, which cost a process
+  on every matching tool call and, in some Windows terminal hosts, a console
+  window that flashes and goes. `apply`, `save`, `modify`, `append`, `mkdir` and
+  `touch` matched no agent tool that the remaining verbs did not already cover,
+  and did match a great many MCP tools that touch no file at all. The matcher
+  decides the *message* and not the *protection* — a write it never sees is
+  still refused by the kernel — so speculating there buys nothing and is paid
+  for on every call.
+- **`schtasks` is now invoked with `CREATE_NO_WINDOW`.** A console program
+  inherits its parent's console unless the parent has none, in which case
+  Windows gives it a fresh visible one. Every caller runs from a terminal today,
+  so this changes nothing today; it stops a window appearing the first time one
+  is called from somewhere without a console.
 - **A guard was reported as failed when it had actually started.** `guard
   --detach` waited three seconds for the background process to claim the project;
   a binary Windows has not scanned before takes about 2.9 seconds to reach its
