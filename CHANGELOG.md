@@ -21,8 +21,16 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
 - **`ralon install` / `ralon uninstall`** — registers a per-user background
   supervisor with the operating system: a Task Scheduler logon task on Windows, a
   launchd LaunchAgent on macOS. No administrator, no root, and it survives a
-  reboot because the OS starts it. `--watch` names the directories to look for
-  projects in; the default is the home directory.
+  reboot because the OS starts it. `--scope` names the directories your projects
+  live in; the default is the home directory.
+- **Each enforced project gets the agent hook**, so an agent that reaches a
+  protected path is told "protected by Ralon", which file, and which pattern
+  matched — with a link to the repository. Without it the agent is handed
+  whatever its runtime made of the OS error, and `EBUSY: resource busy or
+  locked` reads as a corrupt file: observed in a real session, where the agent
+  retried, renamed around it, shelled out, and only worked out what was
+  happening by reading `agent.lock` itself. `--no-hooks` opts out; enforcement
+  does not depend on it.
 - **`ralon pause` / `ralon resume`** — releases one project so its own policy can
   be edited, since `agent.lock` protects itself. A pause expires after fifteen
   minutes unless `--indefinitely` is given: a pause that is forgotten about is a
@@ -60,6 +68,16 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
 
 ### Fixed
 
+- **The agent hooks were scoped by hand-written lists of tool names, and one of
+  them was wrong.** Claude Code's matcher read `Write|Edit|MultiEdit|NotebookEdit`;
+  an agent called a tool its own transcript displayed as `Update`, so the hook
+  never ran and the refusal fell back to the raw OS error. Four agent files each
+  carried their own list, which is four chances to miss a spelling and a silent
+  failure every time. There is now one shared matcher built from *verbs* rather
+  than product names, matching either case, covering every writing tool the nine
+  supported agents are known to have — with a test that pins them. `Bash` and
+  friends are still excluded, still deliberately: a hook cannot tell which paths
+  a shell command will touch.
 - **A guard was reported as failed when it had actually started.** `guard
   --detach` waited three seconds for the background process to claim the project;
   a binary Windows has not scanned before takes about 2.9 seconds to reach its

@@ -90,12 +90,17 @@ fn print_what_a_refusal_looks_like() {
 
 /// Sets the machine up once, so that a project is protected by containing an
 /// `agent.lock` rather than by anyone running a command in it.
-pub fn install(watch: &[PathBuf], depth: Option<usize>, dry_run: bool) -> Result<ExitCode> {
+pub fn install(
+    scope: &[PathBuf],
+    depth: Option<usize>,
+    no_hooks: bool,
+    dry_run: bool,
+) -> Result<ExitCode> {
     if !service::SUPPORTED {
         bail!("{}", service::unsupported_reason());
     }
 
-    let roots = scan_roots(watch)?;
+    let roots = scan_roots(scope)?;
     let executable = std::env::current_exe().context("could not find the ralon executable")?;
     let home = registry::home()?;
 
@@ -103,19 +108,20 @@ pub fn install(watch: &[PathBuf], depth: Option<usize>, dry_run: bool) -> Result
         println!("state      {}", home.display());
         println!("supervisor {}", executable.display());
         for root in &roots {
-            println!("watching   {}", registry::display(root));
+            println!("scope      {}", registry::display(root));
         }
         println!(
             "depth      {}",
             depth.unwrap_or(registry::DEFAULT_MAX_DEPTH)
         );
+        println!("hooks      {}", if no_hooks { "no" } else { "yes" });
         println!();
         println!("Nothing was registered.");
         return Ok(ExitCode::from(OK));
     }
 
     let mut supervisor = Supervisor::load()?;
-    supervisor.set_roots(roots.clone(), depth)?;
+    supervisor.set_scopes(roots.clone(), depth, !no_hooks)?;
 
     // Enforced before the service is registered, and by this process. The
     // developer who just ran `install` is owed protection for the projects that
@@ -130,7 +136,7 @@ pub fn install(watch: &[PathBuf], depth: Option<usize>, dry_run: bool) -> Result
         supervisor.registry().config_path().display()
     );
     for root in &roots {
-        println!("watching   {}", registry::display(root));
+        println!("scope      {}", registry::display(root));
     }
     println!("registered {}", registration.mechanism);
     if let Some(path) = &registration.path {
@@ -147,19 +153,30 @@ pub fn install(watch: &[PathBuf], depth: Option<usize>, dry_run: bool) -> Result
             "projects"
         )
     );
+    println!("log        {}", supervisor.registry().log_path().display());
     for warning in &registration.warnings {
         eprintln!("ralon: warning: {warning}");
     }
 
     println!();
-    println!("Any project under those directories with an {POLICY_FILE} is now enforced,");
-    println!("including ones cloned later. Nothing to run per project.");
+    println!("Install once → declare policy → enforcement starts automatically.");
+    println!();
+    println!("There is no third step. Write an {POLICY_FILE} in any project under those");
+    println!("directories and it is enforced within a second, including projects cloned");
+    println!("later. Delete the file and enforcement stops.");
     println!();
     println!("  ralon status     what is protected here, and whether it is");
     println!("  ralon pause      release this project to edit its policy");
     println!("  ralon uninstall  stop, and hand everything back");
     println!();
-    print_what_a_refusal_looks_like();
+    if no_hooks {
+        print_what_a_refusal_looks_like();
+    } else {
+        println!("An agent that reaches a protected path is told it is protected by Ralon,");
+        println!("which file, and which pattern matched — the agent hook is installed in a");
+        println!("project as it is enforced. Without it the agent sees only the filesystem's");
+        println!("own error and has to guess. `--no-hooks` turns that off.");
+    }
     if enforce::guard::BACKEND == Backend::Immutable {
         println!();
         print_macos_caveat();
@@ -263,14 +280,15 @@ pub fn daemon(foreground: bool, once: bool, home: Option<PathBuf>) -> Result<Exi
     Ok(ExitCode::from(OK))
 }
 
-/// The directories `install` will search, checked before anything is written.
+/// The scopes `install` will honour a policy in, checked before anything is
+/// written.
 fn scan_roots(requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let requested: Vec<PathBuf> = if requested.is_empty() {
         // The home directory, because a developer's repositories are somewhere
         // under it and asking which subdirectory is a question most people
         // would answer with "all of them".
         vec![registry::user_home().context(
-            "could not find your home directory — pass --watch with a directory to search",
+            "could not find your home directory — pass --scope with a directory instead",
         )?]
     } else {
         requested.to_vec()
@@ -705,11 +723,13 @@ fn report_supervisor(policy: &Policy) {
         (false, false) => println!("supervisor not installed (`ralon install`)"),
     }
 
+    println!("log        {}", registry.log_path().display());
+
     if !registry.config.covers(&root) {
         println!(
-            "workspace  outside every watched directory, so the supervisor will not \
-             enforce it\n           (`ralon install --watch {}`)",
-            root.display()
+            "workspace  outside every declared scope, so the supervisor will not \
+             enforce it\n           (`ralon install --scope {}`)",
+            registry::display(&root)
         );
         return;
     }
@@ -729,7 +749,7 @@ fn report_supervisor(policy: &Policy) {
         Some(registry::State::Failed { reason }) => {
             println!("workspace  NOT protected — {reason}");
         }
-        None => println!("workspace  watched, not yet enforced (`ralon daemon --once`)"),
+        None => println!("workspace  in scope, not yet enforced (`ralon daemon --once`)"),
     }
 }
 

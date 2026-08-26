@@ -19,13 +19,15 @@ You set the machine up once:
 ```console
 $ ralon install
 registered a Task Scheduler logon task
-watching   C:\Users\dev
+scope      C:\Users\dev
 ```
 
-From then on, a repository is protected **because it contains an `agent.lock`**.
-Clone it, write the file, and the paths it names are refused to every process on
-the machine — no command to run in the project, no wrapper around the agent, and
-nothing to remember after a reboot.
+**Install once → declare policy → enforcement starts automatically.**
+
+There is no third step. A repository is protected *because it contains an
+`agent.lock`*: write the file and the paths it names are refused to every process
+on the machine; delete the file and enforcement stops. No command to run in the
+project, no wrapper around the agent, nothing to remember after a reboot.
 
 Those paths are read-only *to the kernel*. Not a linter, not a hook the agent can
 talk its way past, not a prompt it can forget. `open()` fails, `rm` fails, and
@@ -75,14 +77,18 @@ never heard of Ralon. `ralon status` says which one you are getting and why.
 **Windows and macOS.**
 
 ```console
-$ ralon install                # register the supervisor; watches your home directory
-$ ralon install --watch ~/code --watch ~/work    # or name the directories yourself
+$ ralon install                # your home directory is the default scope
+$ ralon install --scope ~/code --scope ~/work    # or name the directories yourself
 ```
 
 That registers a per-user background supervisor with the operating system — a
 Task Scheduler logon task on Windows, a launchd LaunchAgent on macOS — and
-records which directories to look for projects in. No administrator, no root, and
+records which directories your projects live in. No administrator, no root, and
 it comes back after a reboot because the operating system starts it.
+
+A scope is a boundary, not a surveillance area: it is the answer to "why doesn't
+an `agent.lock` inside a downloaded archive lock files on my machine". Ralon
+honours a policy only inside a directory you named.
 
 After that, the whole workflow is:
 
@@ -92,10 +98,16 @@ $ cd app && $EDITOR agent.lock     # say what must not change
                                    # …that is the entire remaining step
 ```
 
-The supervisor notices the file — `ReadDirectoryChangesW` on Windows, FSEvents on
-macOS, both kernel notifications rather than polling — and enforcement is in
-place within a second. A repository cloned next month is covered by the same
-setup.
+Declaring the policy is what starts enforcement, and it takes under a second —
+the operating system reports the new file (`ReadDirectoryChangesW` on Windows,
+FSEvents on macOS; kernel notifications, not polling). A repository cloned next
+month is covered by the same one-time setup.
+
+Your agents are configured at the same moment, so an agent that reaches a
+protected path is told **"protected by Ralon"**, which file, and which pattern
+matched — instead of being handed `EBUSY: resource busy or locked` and left to
+conclude the repository is broken. `--no-hooks` turns that off; enforcement does
+not depend on it either way.
 
 Day to day:
 
@@ -119,10 +131,23 @@ patterns relative to itself — no PIDs, no sockets, no absolute paths, no daemo
 state — so it is safe to commit and identical on every machine that checks the
 repository out. The supervisor never writes to it.
 
-It also grants nothing by existing. Only directories you named with `ralon
-install` are searched, so an `agent.lock` inside a downloaded archive protects
-nothing and locks nothing: being *found* is a permission the developer gives
-once, to a directory, by name.
+It also grants nothing by existing. A policy is honoured only inside a scope you
+named with `ralon install`, so an `agent.lock` inside a downloaded archive or a
+dependency's source tree protects nothing and locks nothing: being *honoured* is
+a permission the developer gives once, to a directory, by name.
+
+### Where the logs are
+
+| | |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\Ralon\supervisor.log` |
+| macOS | `~/Library/Application Support/Ralon/supervisor.log` (plus `launchd.log` for anything launchd itself says) |
+| Linux | `$XDG_STATE_HOME/ralon/supervisor.log`, or `~/.local/state/ralon/` |
+
+`ralon status` and `ralon install` both print the exact path, so you never have
+to guess. `RALON_HOME` relocates the whole directory — the config, the recorded
+workspaces and the log. One line per event, timestamped; it starts over once it
+passes a megabyte.
 
 ## Two ways to enforce
 
@@ -201,7 +226,8 @@ defeatable for exactly that reason.
 | Ralon is not installed | Nothing is enforced. `agent.lock` is an ordinary file. |
 | The supervisor is stopped or was never started | Projects it had already enforced **stay** enforced on macOS (the flag is on disk) and are **released** on Windows (the locks die with the process). `ralon status` reports both cases separately. |
 | `agent.lock` is malformed | That project is not enforced, and says so: `ralon status` exits 2 and names the line. Nothing is half-applied, and a policy that cannot be read locks nothing rather than locking everything. |
-| The project is outside every watched directory | Not enforced. `ralon status` says so and prints the `--watch` that would fix it. |
+| The project is outside every declared scope | Not enforced. `ralon status` says so and prints the `--scope` that would fix it. |
+| The agent hook is missing | Still enforced — the agent just sees the filesystem's own error (`EBUSY`, `Access is denied`, `EPERM`) rather than being told why. `ralon hook install` fixes it. |
 | `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |
 
 `ralon status` answers "is the supervisor registered", "is it running" and "is

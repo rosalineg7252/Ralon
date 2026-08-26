@@ -53,10 +53,11 @@ fn dispatch() -> Result<ExitCode> {
 
     match cli.command {
         Command::Install {
-            watch,
+            scope,
             depth,
+            no_hooks,
             dry_run,
-        } => commands::install(&watch, depth, dry_run),
+        } => commands::install(&scope, depth, no_hooks, dry_run),
         Command::Uninstall { keep_enforcement } => commands::uninstall(keep_enforcement),
         Command::Pause {
             minutes,

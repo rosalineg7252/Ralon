@@ -28,16 +28,17 @@ pub const EVENT: &str = "PreToolUse";
 /// hooks the project already had are untouched.
 const NAME: &str = "ralon";
 
-/// Antigravity's editing tools. Its heritage is Cascade, so the write tool is
-/// `replace_file_content`; `edit`/`write` are matched too in case a build
-/// spells them differently.
-const MATCHER: &str = "replace_file_content|write_to_file|create_file|edit|write";
+// Antigravity's heritage is Cascade, so its write tool is
+// `replace_file_content`, alongside `write_to_file` and `create_file`. All three
+// are covered by the shared verb matcher in `hook::write_matcher` — and unlike
+// the list that used to live here, so is whatever the next build renames them
+// to, as long as it still reads like a verb.
 
 pub fn entry() -> Value {
     json!({
         "enabled": true,
         EVENT: [{
-            "matcher": MATCHER,
+            "matcher": super::write_matcher(),
             "hooks": [{
                 "type": "command",
                 "command": "ralon hook check",

@@ -64,12 +64,22 @@ impl Machine {
     }
 
     fn configure(&self, roots: &[PathBuf]) {
+        self.write_config(roots, true);
+    }
+
+    /// Rewrites the config, keeping the scopes, with the hooks turned off.
+    fn set_hooks(&self, hooks: bool) {
+        self.write_config(std::slice::from_ref(&self.code), hooks);
+    }
+
+    fn write_config(&self, roots: &[PathBuf], hooks: bool) {
         let mut text = String::from("roots:\n");
         for root in roots {
             let canonical = fs::canonicalize(root).unwrap_or_else(|_| root.clone());
             text.push_str(&format!("- {}\n", yaml(&canonical)));
         }
         text.push_str("max_depth: 8\n");
+        text.push_str(&format!("hooks: {hooks}\n"));
         fs::write(self.home.join("config.yaml"), text).unwrap();
     }
 
@@ -171,6 +181,34 @@ impl Repository {
             .expect("failed to run ralon")
     }
 
+    /// Feeds one agent request to `ralon hook check`, the way an installed hook
+    /// does. This is the only interception point whose wording Ralon owns, so
+    /// what comes back is worth asserting on directly.
+    fn hook(&self, request: &str) -> Output {
+        use std::io::Write;
+
+        let mut child = Command::new(BINARY)
+            .arg("--dir")
+            .arg(&self.root)
+            .args(["hook", "check"])
+            .env("RALON_HOME", &self.home)
+            .current_dir(&self.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to run ralon");
+        child
+            .stdin
+            .take()
+            .expect("stdin was piped")
+            .write_all(request.as_bytes())
+            .expect("failed to send the request");
+        child
+            .wait_with_output()
+            .expect("failed to read the decision")
+    }
+
     /// Whether an ordinary write to `relative` gets through.
     ///
     /// Run in a separate shell process on purpose: the whole claim being tested
@@ -269,20 +307,20 @@ fn code(output: &Output) -> i32 {
 
 #[cfg(any(windows, target_os = "macos"))]
 #[test]
-fn a_policy_outside_every_watched_directory_is_never_enforced() {
+fn a_policy_outside_every_declared_scope_is_never_enforced() {
     let machine = Machine::new();
-    // Watching a directory that exists but holds no projects.
-    let empty = machine.code.join("watched");
+    // A scope that exists but holds no projects.
+    let empty = machine.code.join("in-scope");
     fs::create_dir_all(&empty).unwrap();
     machine.configure(&[empty]);
 
-    // A repository with a perfectly good policy, somewhere nobody registered —
+    // A repository with a perfectly good policy, somewhere nobody declared —
     // the shape of an `agent.lock` that arrived inside a downloaded archive.
-    let elsewhere = machine.repository("unwatched", Some(POLICY));
+    let elsewhere = machine.repository("out-of-scope", Some(POLICY));
 
     machine.tick();
     assert!(
-        !machine.recorded().contains("unwatched"),
+        !machine.recorded().contains("out-of-scope"),
         "a policy outside every scan root was picked up: {}",
         machine.recorded()
     );
@@ -417,7 +455,7 @@ mod without_a_supervisor {
     #[test]
     fn install_refuses_and_explains_why() {
         let machine = Machine::new();
-        let attempt = machine.ralon(&["install", "--watch", machine.code.to_str().unwrap()]);
+        let attempt = machine.ralon(&["install", "--scope", machine.code.to_str().unwrap()]);
 
         assert_ne!(
             code(&attempt),
@@ -436,7 +474,7 @@ mod without_a_supervisor {
     }
 
     #[test]
-    fn the_daemon_refuses_to_run_rather_than_watching_files_it_cannot_protect() {
+    fn the_daemon_refuses_to_run_rather_than_tracking_files_it_cannot_protect() {
         let machine = Machine::new();
         let _repository = machine.repository("app", Some(POLICY));
 
@@ -512,6 +550,64 @@ mod with_a_supervisor {
         assert!(
             repository.writable("src/App.tsx"),
             "an unprotected file stopped being writable"
+        );
+    }
+
+    #[test]
+    fn an_enforced_project_is_given_the_agent_hook() {
+        // Without this the enforcement still holds and the *message* does not:
+        // the agent is handed `EBUSY: resource busy or locked`, decides the file
+        // is corrupt, and retries, renames around it and shells out before
+        // giving up. Observed in a real session, which is why the supervisor
+        // installs the hook rather than leaving it to be discovered.
+        let machine = Machine::new();
+        let repository = machine.repository("app", Some(POLICY));
+        machine.tick();
+
+        let settings = repository.contents(".claude/settings.json");
+        assert!(
+            settings.contains("ralon hook check"),
+            "no hook was installed: {settings}"
+        );
+
+        // The message the agent actually receives, for the tool spelling that
+        // slipped past the old hand-written matcher.
+        let request = format!(
+            r#"{{"tool_name":"Update","tool_input":{{"file_path":"{}"}}}}"#,
+            repository
+                .path(".env")
+                .display()
+                .to_string()
+                .replace('\\', "\\\\")
+        );
+        let refused = repository.hook(&request);
+        assert_eq!(code(&refused), 2, "the hook allowed a protected write");
+        let said = stdout(&refused);
+        assert!(said.contains("protected by Ralon"), "{said}");
+        assert!(
+            said.contains("github.com/stoneware-dev/Ralon"),
+            "the refusal carries no link back to the project: {said}"
+        );
+        assert!(
+            !said.contains("EBUSY"),
+            "the refusal repeats the raw OS error it exists to replace: {said}"
+        );
+    }
+
+    #[test]
+    fn no_hooks_leaves_the_project_alone_but_still_enforces_it() {
+        let machine = Machine::new();
+        machine.set_hooks(false);
+        let repository = machine.repository("app", Some(POLICY));
+        machine.tick();
+
+        assert!(
+            !repository.path(".claude").exists(),
+            "the supervisor wrote agent configuration after being told not to"
+        );
+        assert!(
+            !repository.writable(".env"),
+            "enforcement was skipped along with the hooks"
         );
     }
 

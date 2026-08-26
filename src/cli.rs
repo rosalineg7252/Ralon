@@ -22,27 +22,40 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Set this machine up once, so any project with an agent.lock is enforced
+    /// Set this machine up once. After that: declare a policy, and enforcement
+    /// starts on its own
+    ///
+    /// Install once → declare policy → enforcement starts automatically. There
+    /// is no third step and nothing to run inside a project: writing an
+    /// `agent.lock` is what turns enforcement on, and deleting it is what turns
+    /// enforcement off.
     ///
     /// Registers a background supervisor with the operating system — a logon
-    /// task on Windows, a LaunchAgent on macOS — and tells it which directories
-    /// to look for projects in. After this, a repository is protected because it
-    /// contains an `agent.lock`, with nothing to run per project and nothing to
-    /// wrap the agent in.
+    /// task on Windows, a LaunchAgent on macOS — and records which directories
+    /// your projects live in.
     ///
     /// Not available on Linux, where a restriction can only be inherited by a
     /// process at startup and never imposed on one already running. `ralon
-    /// install` explains that rather than registering a service that would watch
-    /// files it cannot protect.
+    /// install` explains that rather than registering a service that could
+    /// notice a policy and do nothing about it.
     Install {
-        /// A directory to look for projects in. Repeatable.
+        /// A directory your projects live in. Repeatable.
         /// Defaults to your home directory.
-        #[arg(long = "watch", value_name = "DIR")]
-        watch: Vec<PathBuf>,
+        #[arg(long = "scope", value_name = "DIR")]
+        scope: Vec<PathBuf>,
 
-        /// How deep below a watched directory a project may be
+        /// How deep inside a scope a project may be
         #[arg(long, value_name = "N")]
         depth: Option<usize>,
+
+        /// Do not configure the agents
+        ///
+        /// By default each enforced project gets the agent hook, so an agent is
+        /// told "protected by Ralon" instead of being handed the raw OS error.
+        /// Without it the policy is still enforced — the agent just reports
+        /// `EBUSY: resource busy or locked` and has to work out why.
+        #[arg(long)]
+        no_hooks: bool,
 
         /// Print what would be registered and change nothing
         #[arg(long)]

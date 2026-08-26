@@ -13,8 +13,9 @@
 
 use serde_json::{json, Value};
 
-/// The agent's file-writing tools. `replace` is Gemini CLI's in-place edit.
-const MATCHER: &str = "write_file|replace|edit";
+// Gemini CLI writes with `write_file` and edits in place with `replace`. Both
+// are covered by the shared verb matcher in `hook::write_matcher`, rather than
+// by a list kept in this file that only this file would remember to update.
 
 pub const SETTINGS: &str = ".gemini/settings.json";
 
@@ -22,7 +23,7 @@ pub const EVENT: &str = "BeforeTool";
 
 pub fn entry() -> Value {
     json!({
-        "matcher": MATCHER,
+        "matcher": super::write_matcher(),
         "hooks": [{
             "type": "command",
             "command": "ralon hook check"

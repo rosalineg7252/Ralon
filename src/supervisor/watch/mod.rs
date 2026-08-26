@@ -50,7 +50,7 @@ pub trait Watcher: Send {
 pub fn start(roots: &[PathBuf]) -> Box<dyn Watcher> {
     if roots.is_empty() {
         return Box::new(sweep::Blind::new(
-            "no scan roots are configured, so nothing is being watched".to_string(),
+            "no scopes are configured, so no project can be enforced".to_string(),
         ));
     }
     match platform::start(roots) {

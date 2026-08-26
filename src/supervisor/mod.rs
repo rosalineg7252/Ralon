@@ -220,9 +220,15 @@ impl Supervisor {
         Ok(Vec::new())
     }
 
-    /// Records which directories to search, keeping everything already known.
-    pub fn set_roots(&mut self, roots: Vec<PathBuf>, depth: Option<usize>) -> Result<()> {
+    /// Records the declared scopes, keeping everything already known.
+    pub fn set_scopes(
+        &mut self,
+        roots: Vec<PathBuf>,
+        depth: Option<usize>,
+        hooks: bool,
+    ) -> Result<()> {
         self.registry.config.roots = roots;
+        self.registry.config.hooks = hooks;
         if let Some(depth) = depth {
             self.registry.config.max_depth = depth;
         }
@@ -282,6 +288,12 @@ impl Supervisor {
                 return;
             }
         };
+
+        // Before the guard, not after. Once enforcement is in place the project
+        // is locked, and a policy that happens to protect the agent's own
+        // configuration directory would make this impossible — which would be a
+        // strange way to lose the one message Ralon actually owns.
+        self.configure_agents(root);
 
         // Already claimed — by a guard the developer started by hand, or by one
         // this supervisor started before it was restarted. Either way the
@@ -356,6 +368,45 @@ impl Supervisor {
         }
     }
 
+    /// Writes the agent hook into a project that is about to be enforced.
+    ///
+    /// This is what decides whether an agent hitting a protected path reads
+    /// "protected by Ralon" or `EBUSY: resource busy or locked`. Both mean the
+    /// same thing to the filesystem and nothing like the same thing to the agent:
+    /// the second one reads as a corrupt file, so it retries, renames around it,
+    /// and shells out — none of which work, all of which waste a few minutes and
+    /// end with the developer being told their repository is broken.
+    ///
+    /// Ralon cannot rewrite the OS error; it is produced inside the agent's own
+    /// runtime from a code Ralon caused but does not own. The hook is the only
+    /// interception point that exists, which is why it is installed by default
+    /// rather than being left as something to discover afterwards.
+    ///
+    /// Never fatal. Enforcement does not depend on it, and a project whose hook
+    /// could not be written is still protected — just less politely.
+    fn configure_agents(&mut self, root: &Path) {
+        if !self.registry.config.hooks {
+            return;
+        }
+        match crate::hook::install_for(root, crate::cli::Agent::All, false) {
+            Ok(installed) => {
+                let written = installed.iter().filter(|entry| !entry.replaced).count();
+                if written > 0 {
+                    self.say(&format!(
+                        "configured {written} agents in {}",
+                        registry::display(root)
+                    ));
+                }
+            }
+            Err(error) => self.say(&format!(
+                "could not configure the agents in {}: {error:#} — the policy is \
+                 still enforced, but an agent will see the raw filesystem error \
+                 rather than being told why",
+                registry::display(root)
+            )),
+        }
+    }
+
     /// What enforcement would cover, resolved against the disk.
     ///
     /// Run before anything is started so a policy that does not parse is a
@@ -378,7 +429,7 @@ impl Supervisor {
             println!("ralon: {message}");
         }
         if let Some(log) = &mut self.log {
-            let _ = writeln!(log, "{} {message}", registry::now());
+            let _ = writeln!(log, "{}  {message}", registry::timestamp(registry::now()));
             let _ = log.flush();
         }
     }

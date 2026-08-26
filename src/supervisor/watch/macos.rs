@@ -148,10 +148,10 @@ impl Watcher for Events {
 
     fn describe(&self) -> String {
         format!(
-            "watching {} via FSEvents",
+            "enforcement starts on a new policy in {} (FSEvents)",
             self.roots
                 .iter()
-                .map(|root| root.display().to_string())
+                .map(|root| crate::supervisor::registry::display(root))
                 .collect::<Vec<_>>()
                 .join(", ")
         )

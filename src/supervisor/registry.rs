@@ -68,14 +68,25 @@ pub const SKIPPED: &[&str] = &[
 /// The part a person edits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Where to look for `agent.lock`.
+    /// Directories the developer's projects live in.
     pub roots: Vec<PathBuf>,
     #[serde(default = "default_depth")]
     pub max_depth: usize,
+    /// Whether an enforced project also gets the agent hook.
+    ///
+    /// On by default, and it is the difference between an agent being told
+    /// "protected by Ralon" and being handed `EBUSY: resource busy or locked` to
+    /// interpret. Enforcement does not depend on it either way.
+    #[serde(default = "default_hooks")]
+    pub hooks: bool,
 }
 
 fn default_depth() -> usize {
     DEFAULT_MAX_DEPTH
+}
+
+fn default_hooks() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -83,15 +94,16 @@ impl Default for Config {
         Config {
             roots: Vec::new(),
             max_depth: DEFAULT_MAX_DEPTH,
+            hooks: true,
         }
     }
 }
 
 impl Config {
-    /// Whether `path` lies inside a registered scan root.
+    /// Whether `path` lies inside a declared scope.
     ///
-    /// Checked on every candidate, including the ones a watcher reports, so a
-    /// notification about a directory nobody registered cannot smuggle a
+    /// Checked on every candidate, including the ones a filesystem notification
+    /// reports, so an event about a directory nobody declared cannot smuggle a
     /// workspace in behind the configuration.
     pub fn covers(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
@@ -373,6 +385,47 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
+/// `2026-08-26 09:14:11Z`, for the log.
+///
+/// Hand-rolled rather than pulled in with a date crate. The whole point of this
+/// program is that it has no runtime dependencies, and a log line is not worth
+/// the first one — while `1787762051` in a file a developer opens when something
+/// has gone wrong is worth rather less than nothing.
+///
+/// UTC, with the `Z` said out loud. A supervisor's log is read next to an
+/// agent's transcript and a shell's history, and a local time with no offset is
+/// the one format that cannot be lined up against either.
+pub fn timestamp(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let time = seconds % 86_400;
+
+    // Howard Hinnant's civil-from-days, which is exact for any date and short
+    // enough to check by eye. Shifts the epoch to 0000-03-01 so leap days land
+    // at the end of the cycle and the month arithmetic has no special cases.
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let march_month = (5 * day_of_year + 2) / 153;
+
+    let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+    let month = if march_month < 10 {
+        march_month + 3
+    } else {
+        march_month - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}Z",
+        time / 3600,
+        (time % 3600) / 60,
+        time % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +435,7 @@ mod tests {
         let config = Config {
             roots: vec![PathBuf::from("/home/dev/code")],
             max_depth: DEFAULT_MAX_DEPTH,
+            hooks: true,
         };
         assert!(config.covers(Path::new("/home/dev/code/app")));
         assert!(!config.covers(Path::new("/tmp/downloaded/app")));
@@ -390,6 +444,22 @@ mod tests {
     #[test]
     fn no_roots_covers_nothing() {
         assert!(!Config::default().covers(Path::new("/anywhere")));
+    }
+
+    #[test]
+    fn timestamps_are_readable_and_correct() {
+        assert_eq!(timestamp(0), "1970-01-01 00:00:00Z");
+        // A leap day, and the day after it, in a century year that *is* a leap
+        // year — the case the naive `% 4` version gets wrong.
+        assert_eq!(timestamp(951_782_400), "2000-02-29 00:00:00Z");
+        assert_eq!(timestamp(951_868_800), "2000-03-01 00:00:00Z");
+        // A century year that is not.
+        assert_eq!(timestamp(4_107_542_400), "2100-03-01 00:00:00Z");
+        // UTC, not local. 20691 whole days past the epoch leaves 59651 seconds,
+        // which is 16:34:11 — worth spelling out, because the first version of
+        // this assertion read the local clock off the machine it was written on
+        // and expected 18:34.
+        assert_eq!(timestamp(1_787_762_051), "2026-08-26 16:34:11Z");
     }
 
     #[test]

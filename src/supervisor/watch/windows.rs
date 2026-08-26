@@ -131,10 +131,10 @@ impl Watcher for Directories {
 
     fn describe(&self) -> String {
         format!(
-            "watching {} via ReadDirectoryChangesW",
+            "enforcement starts on a new policy in {} (ReadDirectoryChangesW)",
             self.roots
                 .iter()
-                .map(|root| root.display().to_string())
+                .map(|root| crate::supervisor::registry::display(root))
                 .collect::<Vec<_>>()
                 .join(", ")
         )

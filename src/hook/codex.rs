@@ -12,8 +12,10 @@
 
 use serde_json::{json, Value};
 
-/// The agent's file-writing tools.
-const MATCHER: &str = "apply_patch|Edit|Write";
+// Codex's edit tool is `apply_patch`, alongside `Edit` and `Write`. All three
+// are covered by the shared verb matcher in `hook::write_matcher`, which is
+// built once rather than hand-listed per agent — the per-agent lists were how a
+// tool spelling got missed and a hook silently stopped running.
 
 /// Codex reads `hooks.json` beside the repo's config, or an inline `[hooks]`
 /// table in `config.toml`. The JSON file is the one Ralon writes: it can be
@@ -24,7 +26,7 @@ pub const EVENT: &str = "PreToolUse";
 
 pub fn entry() -> Value {
     json!({
-        "matcher": MATCHER,
+        "matcher": super::write_matcher(),
         "hooks": [{
             "type": "command",
             "command": "ralon hook check",

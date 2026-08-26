@@ -6,12 +6,12 @@
 
 use serde_json::{json, Value};
 
-/// The agent's file-writing tools.
-///
-/// `Bash` is deliberately absent: a hook cannot tell which paths an arbitrary
-/// shell command will touch, and a matcher that pretends otherwise would give
-/// false confidence — worse than an honest gap.
-const MATCHER: &str = "Write|Edit|MultiEdit|NotebookEdit";
+// Claude Code's writing tools are `Write`, `Edit`, `MultiEdit` and
+// `NotebookEdit` — and its transcript has been seen calling one `Update`, which
+// the old hand-written matcher here did not list, so the hook never ran. The
+// matcher is now built from verbs in `hook::write_matcher` and shared with every
+// other agent, which covers all five without naming any of them. `Bash` is still
+// excluded: see the note there.
 
 /// Where the agent keeps per-project settings, relative to the project root.
 pub const SETTINGS: &str = ".claude/settings.json";
@@ -22,7 +22,7 @@ pub const EVENT: &str = "PreToolUse";
 /// The entry to install.
 pub fn entry() -> Value {
     json!({
-        "matcher": MATCHER,
+        "matcher": super::write_matcher(),
         "hooks": [{
             "type": "command",
             "command": "ralon hook check",

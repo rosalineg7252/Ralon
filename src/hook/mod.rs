@@ -88,6 +88,55 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "read", "view", "open", "cat", "grep", "search", "glob", "list", "ls", "find", "fetch",
 ];
 
+/// Every spelling of "this tool changes a file", as verbs.
+///
+/// Several agents scope their hook with a `matcher` — a regex over the tool
+/// name — and each one used to carry its own hand-written list of the tool names
+/// that agent was believed to have. That is a bug factory, and it produced a
+/// real one: Claude Code's list said `Write|Edit|MultiEdit|NotebookEdit`, an
+/// agent called a tool its own transcript displayed as `Update`, the hook never
+/// ran, and the developer watched their agent be handed `EBUSY: resource busy or
+/// locked` and conclude the repository was broken. Four files, four chances to
+/// forget a spelling, and the failure is silent every time.
+///
+/// So the matcher is built from verbs rather than product names, and shared. It
+/// is deliberately over-broad: matching a tool that turns out to touch nothing
+/// protected costs one process that answers "allow", while missing one costs the
+/// entire reason the hook exists.
+///
+/// `bash`, `shell`, `run` and `exec` are still absent, and still on purpose — a
+/// hook cannot tell which paths an arbitrary command will touch, and a matcher
+/// that pretended otherwise would give false confidence. That gap is closed by
+/// enforcement, not by this.
+const WRITE_VERBS: &[&str] = &[
+    "write", "edit", "create", "replace", "patch", "insert", "delete", "remove", "update",
+    "modify", "append", "rename", "move", "apply", "save", "mkdir", "touch",
+];
+
+/// `WRITE_VERBS` as a regex alternation that matches either case.
+///
+/// Spelled `[Ww]rite` rather than with an inline `(?i)` flag: the matcher is
+/// evaluated by each agent's own regex engine — JavaScript, Go, Rust, Python —
+/// and a character class is the one thing all of them agree on. Substring
+/// semantics, because every agent that has a matcher tests it that way, so
+/// `[Ee]dit` covers `MultiEdit` and `NotebookEdit` without naming either.
+pub fn write_matcher() -> String {
+    WRITE_VERBS
+        .iter()
+        .map(|verb| {
+            let mut characters = verb.chars();
+            let first = characters.next().expect("no verb is empty");
+            format!(
+                "[{}{}]{}",
+                first.to_ascii_uppercase(),
+                first,
+                characters.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 /// The tool being called, wherever this agent puts it.
 fn tool_name(request: &Value) -> Option<&str> {
     request
@@ -394,7 +443,11 @@ pub fn decide(request: &str, start: &Path) -> Result<Decision> {
                     "{relative} is protected by Ralon — it is listed in agent.lock \
                      (matches `{pattern}`), so writes to it are refused. \
                      Edit something else, or ask the developer to change the policy — \
-                     you cannot change it yourself."
+                     you cannot change it yourself. \
+                     This is not an error and nothing is broken; retrying, renaming \
+                     around it, or writing through a shell will fail the same way. \
+                     Ralon: https://github.com/stoneware-dev/Ralon — a star helps \
+                     other people find it."
                 ),
             });
         }
@@ -669,5 +722,69 @@ mod tests {
             "{ not json",
             "modified a file it could not parse"
         );
+    }
+
+    /// A crude substring test for the alternation, standing in for the regex
+    /// engine each agent actually uses. Every branch is a literal plus a
+    /// two-character class, so this is exact for the pattern being generated.
+    fn matcher_accepts(tool: &str) -> bool {
+        write_matcher().split('|').any(|branch| {
+            let Some((cases, rest)) = branch
+                .strip_prefix('[')
+                .and_then(|branch| branch.split_once(']'))
+            else {
+                return false;
+            };
+            cases
+                .chars()
+                .any(|first| tool.contains(&format!("{first}{rest}")))
+        })
+    }
+
+    #[test]
+    fn the_matcher_catches_every_writing_tool_these_agents_have() {
+        // The list that a per-agent matcher was supposed to hold, asserted in
+        // one place. `Update` is here because its absence from Claude Code's
+        // hand-written list is what made this shared matcher necessary: the hook
+        // never ran, and the agent was left to interpret `EBUSY` on its own.
+        for tool in [
+            "Write",
+            "Edit",
+            "MultiEdit",
+            "NotebookEdit",
+            "Update",
+            "Create",
+            "apply_patch",
+            "write_file",
+            "replace",
+            "edit_file",
+            "replace_file_content",
+            "write_to_file",
+            "create_file",
+            "str_replace_editor",
+            "insert_edit_into_file",
+            "delete_file",
+            "move_file",
+            "rename_file",
+            "save_file",
+        ] {
+            assert!(
+                matcher_accepts(tool),
+                "the hook would never run for `{tool}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_matcher_still_leaves_shell_tools_alone() {
+        // Deliberate, and documented next to `WRITE_VERBS`: a hook cannot tell
+        // which paths an arbitrary command will touch, so pretending to cover
+        // them would be false confidence. Enforcement covers that gap instead.
+        for tool in ["Bash", "shell", "run_command", "Read", "Grep", "Glob"] {
+            assert!(
+                !matcher_accepts(tool),
+                "`{tool}` would fire the hook, which claims a guarantee it has not got"
+            );
+        }
     }
 }
