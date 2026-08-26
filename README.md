@@ -464,10 +464,11 @@ Otherwise `run` exits with your command's own status.
 
 ## Documentation
 
-- [`DESIGN.md`](DESIGN.md) — **start here.** The pipeline, the two process
-  models, what each of the four backends actually does, and the designs that
-  were rejected
-- [`architecture.md`](architecture.md) — deeper on the two Linux backends
+- [`DESIGN.md`](DESIGN.md) — **start here.** The pipeline, the three process
+  models, the capability matrix for all five backends, why one of them cannot
+  pin ancestors, and the designs that were rejected
+- [`architecture.md`](architecture.md) — deeper on the Linux backends and the
+  supervisor
 - [`security.md`](security.md) — threat model, what is guaranteed, and the
   limitations that have been tested rather than assumed
 - [`publishing.md`](publishing.md) — cutting a release: what a tag does, and
