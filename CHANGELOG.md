@@ -91,6 +91,20 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   supported agents are known to have — with a test that pins them. `Bash` and
   friends are still excluded, still deliberately: a hook cannot tell which paths
   a shell command will touch.
+- **A release ran no tests.** `cargo test`, `clippy` and `fmt` lived only in
+  `ci.yml`, which triggers on branches and pull requests — and a tag push is
+  neither, so it never fired. A tag on a commit whose suite was red would pass
+  `guard`, build five binaries, create a GitHub release, and sit one approval
+  away from three permanent registries, with nothing on the page to suggest
+  anything was wrong. `release.yml` now calls `ci.yml` as a reusable workflow
+  before it builds anything, so the tests have one definition and cannot drift
+  from what a pull request runs.
+- **The approval gate showed the reviewer nothing to check.** It printed the tag
+  they had just typed. It now writes a summary naming each registry, what will
+  appear there, and why none of it can be taken back. (The gate itself is only
+  real if the `release` environment has a required reviewer configured under
+  Settings → Environments — a repository setting no workflow file can enforce,
+  now stated in the workflow.)
 - **`ralon guard --detach` never warned about a policy naming paths that are not
   on disk.** The foreground `ralon guard` did; the detached branch returned
   before reaching it. So `--detach` printed "every process on this machine is now

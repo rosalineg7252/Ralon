@@ -4,6 +4,13 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Called by `release.yml` before it builds anything. A tag push does not
+  # trigger the `push`/`pull_request` events above — tags are not branches — so
+  # without this a release ran no tests at all: `guard` checked the version,
+  # `binaries` compiled, and three permanent registries were one approval away
+  # from a commit whose test suite had never been green. Reused rather than
+  # copied, so "what the tests are" has exactly one definition.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

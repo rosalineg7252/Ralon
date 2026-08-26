@@ -5,6 +5,10 @@ name: Release
 #           ▼
 #         guard ......... the tag must match Cargo.toml
 #           │
+#           ▼
+#        verify ......... the whole CI suite, on all three platforms, plus the
+#           │             bypass attacks in a container. Nothing is built until
+#           │             this is green.
 #     ┌─────┴─────┬───────────┬───────────┬───────────┐
 #     ▼           ▼           ▼           ▼           ▼
 #  linux-x64  linux-arm64  macos-arm  macos-x64  windows-x64
@@ -22,6 +26,9 @@ name: Release
 #
 # npm and PyPI ship the *same* binaries this workflow built, not a second
 # compile of the same source.
+#
+# Every arrow is a hard dependency: a failure anywhere above stops everything
+# below it, and the manual gate is the last thing rather than the only thing.
 
 on:
   push:
@@ -50,8 +57,20 @@ jobs:
           fi
           echo "releasing v$version"
 
-  binaries:
+  # The same jobs a pull request runs — `cargo fmt`, `clippy -D warnings`,
+  # `cargo test` on Linux, macOS and Windows, and the real bypass attempts in a
+  # permissive container. Reused from `ci.yml` rather than restated, so the two
+  # cannot drift apart and quietly disagree about what "tested" means.
+  #
+  # It runs *before* `binaries` rather than beside it. Compiling five targets
+  # from a commit whose tests fail wastes ten minutes and produces artifacts
+  # nobody should be able to approve.
+  verify:
     needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  binaries:
+    needs: verify
     name: ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -153,14 +172,41 @@ jobs:
 
   # One gate for all three registries. Every one of them is effectively
   # append-only, so a mistaken tag is not something to find out about
-  # afterwards. Configure `release` under Settings → Environments with a
-  # required reviewer.
+  # afterwards.
+  #
+  # This job is only a gate if the `release` environment has a **required
+  # reviewer** configured under Settings → Environments. Without one it runs
+  # straight through and publishes unattended — the workflow file cannot enforce
+  # that on its own, which is why it is written down here and printed below.
   approve:
     needs: binaries
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - run: echo "publishing ${GITHUB_REF#refs/tags/}"
+      # Written to the step summary so the reviewer is deciding against
+      # something. Approving a job whose only output is the tag it already knew
+      # is a rubber stamp with extra steps.
+      - name: What approving this will publish
+        shell: bash
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          {
+            echo "## Publishing v$version"
+            echo
+            echo "Tests passed on Linux, macOS and Windows, and the bypass"
+            echo "attacks ran in a container. Five binaries built."
+            echo
+            echo "| Registry | Package | Reversible? |"
+            echo "| --- | --- | --- |"
+            echo "| crates.io | \`ralon\` $version | no — yank hides it, the version is spent |"
+            echo "| npm | \`ralonlock\` + 5 \`@stoneware-dev/*\` | no — unpublish is limited to 72 hours |"
+            echo "| PyPI | \`ralonlock\` $version, 5 wheels | no — the filename can never be reused |"
+            echo
+            echo "Check before approving:"
+            echo "- \`CHANGELOG.md\` has a $version section that matches what shipped"
+            echo "- the GitHub release notes above read correctly"
+            echo "- \`security.md\` covers any new limitation this release introduces"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   crates-io:
     needs: approve
