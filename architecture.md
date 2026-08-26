@@ -97,6 +97,39 @@ are two projects that cannot see each other, and the supervisor would decide a
 guard was not running while it was. It is canonicalized once, where the path
 enters the system, and un-prefixed only for display.
 
+### Scopes
+
+A scope is a directory Ralon will honour an `agent.lock` inside. The set is kept
+**disjoint** by `Config::add`: a path already inside a scope is reported as
+covered rather than added, and a path containing existing scopes absorbs them.
+That is not tidiness — overlapping scopes mean the sweep walking a subtree twice
+and two filesystem registrations reporting the same events, and it is the
+difference between "you already have this" and a configuration a person has to
+diff by eye.
+
+Scopes are canonicalized when added, which is what lets `covers()` be a plain
+component-wise `starts_with`: both sides have already been resolved, so casing,
+`.`, and junctions cannot produce two scopes that fail to recognise each other's
+repositories. Component-wise also means `D:\Projects` does not swallow
+`D:\Projects-old`.
+
+Removing a scope needs no release logic of its own. Drop it from the
+configuration and reconcile: the sweep no longer returns those workspaces, so
+`reconcile` already emits `End` for each. Adding one is the mirror image.
+
+Two things the running supervisor has to notice, both learned the hard way:
+
+- **The scope set can change underneath it.** `ralon scope add` writes the
+  configuration from another process, so the state directory is registered
+  alongside the scopes and a write to `config.yaml` is what wakes the daemon.
+  Without that a new drive waited for the sweep — and appeared to work only
+  because the state directory happened to sit under the one scope being watched.
+- **Most filesystem events are noise.** A registration is recursive and
+  unfiltered, so a scope on a home directory reports every write under `AppData`.
+  Only `agent.lock` and `config.yaml` can change what should be enforced;
+  everything else is ignored, and the sweep runs on a deadline rather than a
+  timeout so that constant activity cannot starve it.
+
 ## Policy semantics
 
 Patterns are relative to the directory holding `agent.lock`, which is also the

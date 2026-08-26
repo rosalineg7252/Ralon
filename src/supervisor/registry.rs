@@ -28,7 +28,10 @@ use crate::policy::POLICY_FILE;
 /// supervisor kept its state somewhere other than the platform default.
 pub const HOME_VAR: &str = "RALON_HOME";
 
-const CONFIG_FILE: &str = "config.yaml";
+/// The scopes, as a person edits them. Public because the running supervisor
+/// watches for it by name: a `ralon scope add` in another terminal writes this
+/// file, and that write is how the daemon finds out.
+pub const CONFIG_FILE: &str = "config.yaml";
 const WORKSPACES_FILE: &str = "workspaces.json";
 
 /// How deep below a scan root an `agent.lock` will be noticed.
@@ -45,6 +48,8 @@ pub const DEFAULT_MAX_DEPTH: usize = 8;
 /// repository. Skipping them is what keeps a full sweep cheap enough to run as a
 /// backstop behind the real watcher.
 pub const SKIPPED: &[&str] = &[
+    // Version control and dependency trees. `.git` alone is thousands of
+    // directories per repository.
     ".git",
     ".hg",
     ".svn",
@@ -62,8 +67,30 @@ pub const SKIPPED: &[&str] = &[
     ".gradle",
     "Pods",
     "DerivedData",
+    // Platform directories that hold no projects and a great many entries.
+    // `Library` is macOS; the rest are Windows, and `AppData` is the one that
+    // matters — the default scope is the home directory, and on Windows most of
+    // what is under a home directory by count lives in `AppData`. Sweeping it
+    // cost more than everything else put together and could not find anything.
     "Library",
+    "AppData",
+    "Application Data",
+    "$Recycle.Bin",
+    "System Volume Information",
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
 ];
+
+/// What adding a scope did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeChange {
+    /// Now a scope. `replaced` are the narrower ones it absorbed.
+    Added { replaced: Vec<PathBuf> },
+    /// Already inside `by`, so adding it would change nothing.
+    AlreadyCovered { by: PathBuf },
+}
 
 /// The part a person edits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,8 +132,67 @@ impl Config {
     /// Checked on every candidate, including the ones a filesystem notification
     /// reports, so an event about a directory nobody declared cannot smuggle a
     /// workspace in behind the configuration.
+    ///
+    /// `starts_with` compares whole components, so `D:\Projects` does not cover
+    /// `D:\Projects-old`, and it is case-sensitive — which is correct only
+    /// because both sides are canonical by construction. Scopes are canonicalized
+    /// when added and workspaces when discovered, so `d:\projects` and
+    /// `D:\Projects` have both already become whatever the filesystem calls it.
     pub fn covers(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// The scope covering `path`, if any.
+    pub fn covering(&self, path: &Path) -> Option<&Path> {
+        self.roots
+            .iter()
+            .find(|root| path.starts_with(root))
+            .map(PathBuf::as_path)
+    }
+
+    /// Adds a canonical directory as a scope, folding it against the rest.
+    ///
+    /// Scopes are kept as a set of disjoint trees, and this is where that is
+    /// enforced. Two overlapping scopes would mean the sweep walking the same
+    /// subtree twice and two filesystem watchers reporting the same events —
+    /// harmless, since reconciliation is idempotent, and pure waste. More to the
+    /// point, "you already have this" and "this replaces three narrower ones"
+    /// are things a person adding a scope wants to be told rather than left to
+    /// deduce from `scope list`.
+    ///
+    /// Pure: the caller canonicalizes, so the folding rules are testable without
+    /// a filesystem.
+    pub fn add(&mut self, canonical: PathBuf) -> ScopeChange {
+        if let Some(existing) = self.covering(&canonical) {
+            return ScopeChange::AlreadyCovered {
+                by: existing.to_path_buf(),
+            };
+        }
+
+        // Nothing covers it, so it may cover others. A broader scope absorbing
+        // narrower ones keeps the set disjoint without asking.
+        let replaced: Vec<PathBuf> = self
+            .roots
+            .iter()
+            .filter(|root| root.starts_with(&canonical))
+            .cloned()
+            .collect();
+        self.roots.retain(|root| !root.starts_with(&canonical));
+        self.roots.push(canonical);
+        self.roots.sort();
+
+        ScopeChange::Added { replaced }
+    }
+
+    /// Drops a scope. `false` means it was not one.
+    ///
+    /// Only an exact match: removing `D:\Projects\app` when the scope is
+    /// `D:\Projects` would have to either do nothing or silently carve a hole in
+    /// a tree, and a hole is not something this configuration can express.
+    pub fn remove(&mut self, canonical: &Path) -> bool {
+        let before = self.roots.len();
+        self.roots.retain(|root| root != canonical);
+        self.roots.len() != before
     }
 }
 
@@ -444,6 +530,140 @@ mod tests {
     #[test]
     fn no_roots_covers_nothing() {
         assert!(!Config::default().covers(Path::new("/anywhere")));
+    }
+
+    /// Three unrelated places a developer might keep code, spelled the way the
+    /// running platform spells them.
+    ///
+    /// On Windows these are separate *drives*, which is where the scope model
+    /// actually hurt: the first-run default is the home directory on `C:`, and a
+    /// great many developers keep their repositories on `D:` or `E:`. There is no
+    /// Unix equivalent of a drive letter — `Path` there reads `C:\Users\me` as a
+    /// single component with no separator in it — so the same rules are checked
+    /// against separate mount points instead. Both are "roots that share no
+    /// prefix", which is the property every assertion below actually depends on.
+    #[cfg(windows)]
+    const HOME: &str = r"C:\Users\me\Projects";
+    #[cfg(windows)]
+    const SECOND: &str = r"D:\Projects";
+    #[cfg(windows)]
+    const THIRD: &str = r"E:\Work";
+    #[cfg(windows)]
+    const UNRELATED: &str = r"F:\Elsewhere";
+
+    #[cfg(not(windows))]
+    const HOME: &str = "/home/me/Projects";
+    #[cfg(not(windows))]
+    const SECOND: &str = "/mnt/data/Projects";
+    #[cfg(not(windows))]
+    const THIRD: &str = "/media/work";
+    #[cfg(not(windows))]
+    const UNRELATED: &str = "/srv/elsewhere";
+
+    fn under(root: &str, child: &str) -> PathBuf {
+        Path::new(root).join(child)
+    }
+
+    fn scoped(roots: &[&str]) -> Config {
+        let mut config = Config::default();
+        for root in roots {
+            config.add(PathBuf::from(root));
+        }
+        config
+    }
+
+    #[test]
+    fn scopes_on_separate_roots_are_all_covered() {
+        let config = scoped(&[HOME, SECOND, THIRD]);
+
+        assert!(config.covers(&under(HOME, "app")));
+        assert!(config.covers(&under(SECOND, "app")));
+        assert!(config.covers(&under(THIRD, "client/app")));
+        // A root with no scope on it is not covered by a scope on another.
+        assert!(!config.covers(&under(UNRELATED, "app")));
+    }
+
+    #[test]
+    fn where_ralon_is_installed_does_not_decide_what_is_covered() {
+        // The whole complaint: a home directory on C: must not be the reason a
+        // repository on D: goes unprotected.
+        let config = scoped(&[SECOND]);
+        assert!(config.covers(&under(SECOND, "app")));
+        assert!(!config.covers(&under(HOME, "app")));
+    }
+
+    #[test]
+    fn a_scope_inside_a_scope_is_not_added_twice() {
+        let mut config = scoped(&[SECOND]);
+        assert_eq!(
+            config.add(under(SECOND, "client")),
+            ScopeChange::AlreadyCovered {
+                by: PathBuf::from(SECOND)
+            }
+        );
+        assert_eq!(config.roots, [PathBuf::from(SECOND)]);
+    }
+
+    #[test]
+    fn the_same_scope_added_twice_changes_nothing() {
+        let mut config = scoped(&[SECOND]);
+        assert!(matches!(
+            config.add(PathBuf::from(SECOND)),
+            ScopeChange::AlreadyCovered { .. }
+        ));
+        assert_eq!(config.roots.len(), 1);
+    }
+
+    #[test]
+    fn a_broader_scope_absorbs_the_narrower_ones() {
+        let mut config = Config::default();
+        config.add(under(SECOND, "one"));
+        config.add(under(SECOND, "two"));
+        config.add(PathBuf::from(THIRD));
+
+        let change = config.add(PathBuf::from(SECOND));
+        assert_eq!(
+            change,
+            ScopeChange::Added {
+                replaced: vec![under(SECOND, "one"), under(SECOND, "two")]
+            }
+        );
+        // The unrelated scope survives; the set is left disjoint.
+        assert_eq!(
+            config.roots,
+            [PathBuf::from(SECOND), PathBuf::from(THIRD)]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_sibling_with_a_shared_prefix_is_not_covered() {
+        // `starts_with` compares components, not characters. If it did not,
+        // `D:\Projects` would swallow `D:\Projects-old` and the developer would
+        // have a scope they never asked for.
+        let config = scoped(&[SECOND]);
+        assert!(!config.covers(Path::new(&format!("{SECOND}-old"))));
+    }
+
+    #[test]
+    fn removing_a_scope_takes_only_that_one() {
+        let mut config = scoped(&[SECOND, THIRD]);
+        assert!(config.remove(Path::new(SECOND)));
+        assert_eq!(config.roots, [PathBuf::from(THIRD)]);
+        assert!(!config.remove(Path::new(SECOND)));
+    }
+
+    #[test]
+    fn removing_something_that_is_not_a_scope_says_so() {
+        let mut config = scoped(&[SECOND]);
+        // Inside a scope, but not a scope. Removing it would have to carve a
+        // hole this configuration cannot express, so it does nothing and the
+        // caller reports that rather than pretending.
+        assert!(!config.remove(&under(SECOND, "app")));
+        assert_eq!(config.roots, [PathBuf::from(SECOND)]);
     }
 
     #[test]

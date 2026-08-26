@@ -83,9 +83,29 @@ impl Machine {
         fs::write(self.home.join("config.yaml"), text).unwrap();
     }
 
+    /// A directory outside every configured scope.
+    ///
+    /// Stands in for `D:\Projects` on a machine whose only scope is a home
+    /// directory on `C:` — the case that made the scope model a problem worth
+    /// redesigning. A sibling of `code` rather than a child, so no scope reaches
+    /// it until one is added on purpose.
+    fn elsewhere(&self, name: &str) -> PathBuf {
+        let root = self
+            .home
+            .parent()
+            .expect("the state directory has a parent");
+        let path = root.join(name);
+        fs::create_dir_all(&path).unwrap();
+        plain(&fs::canonicalize(&path).unwrap())
+    }
+
     /// A repository, with or without a policy in it.
     fn repository(&self, name: &str, policy: Option<&str>) -> Repository {
-        let root = self.code.join(name);
+        self.repository_in(&self.code.clone(), name, policy)
+    }
+
+    fn repository_in(&self, parent: &Path, name: &str, policy: Option<&str>) -> Repository {
+        let root = parent.join(name);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("config")).unwrap();
         fs::write(root.join(".env"), "SECRET=original").unwrap();
@@ -609,6 +629,223 @@ mod with_a_supervisor {
             !repository.writable(".env"),
             "enforcement was skipped along with the hooks"
         );
+    }
+
+    #[test]
+    fn adding_a_scope_enforces_the_policies_already_under_it() {
+        let machine = Machine::new();
+        // A second tree, nowhere near the configured scope. Stands in for
+        // `D:\Projects` on a machine whose only scope is a home directory on C:.
+        let elsewhere = machine.elsewhere("side");
+        let repository = machine.repository_in(&elsewhere, "app", Some(POLICY));
+
+        machine.tick();
+        assert!(
+            repository.writable(".env"),
+            "a project outside every scope was enforced anyway"
+        );
+
+        let added = machine.ralon(&["scope", "add", elsewhere.to_str().unwrap()]);
+        assert_eq!(code(&added), 0, "{}", stderr(&added));
+        // Enforced by the time the command returns, not at the next sweep.
+        assert!(
+            !repository.writable(".env"),
+            "`scope add` returned before enforcing what it had just taken on"
+        );
+    }
+
+    #[test]
+    fn removing_a_scope_releases_its_projects() {
+        let machine = Machine::new();
+        let elsewhere = machine.elsewhere("side");
+        let repository = machine.repository_in(&elsewhere, "app", Some(POLICY));
+
+        machine.ralon(&["scope", "add", elsewhere.to_str().unwrap()]);
+        assert!(!repository.writable(".env"));
+
+        let removed = machine.ralon(&["scope", "remove", elsewhere.to_str().unwrap()]);
+        assert_eq!(code(&removed), 0, "{}", stderr(&removed));
+        assert!(
+            repository.writable(".env"),
+            "dropping a scope left its projects locked with nothing watching them"
+        );
+        assert!(
+            !machine.recorded().contains("side"),
+            "a released project is still recorded: {}",
+            machine.recorded()
+        );
+    }
+
+    #[test]
+    fn several_scopes_are_enforced_at_once_and_independently() {
+        let machine = Machine::new();
+        let one = machine.elsewhere("one");
+        let two = machine.elsewhere("two");
+        let first = machine.repository_in(&one, "app", Some(POLICY));
+        let second = machine.repository_in(&two, "app", Some(POLICY));
+
+        machine.ralon(&["scope", "add", one.to_str().unwrap()]);
+        machine.ralon(&["scope", "add", two.to_str().unwrap()]);
+        assert!(!first.writable(".env"), "scope one was not enforced");
+        assert!(!second.writable(".env"), "scope two was not enforced");
+
+        // Dropping one leaves the other exactly as it was.
+        machine.ralon(&["scope", "remove", one.to_str().unwrap()]);
+        assert!(first.writable(".env"), "scope one was not released");
+        assert!(
+            !second.writable(".env"),
+            "removing one scope released another"
+        );
+    }
+
+    #[test]
+    fn a_project_outside_every_scope_is_told_so_rather_than_ignored() {
+        let machine = Machine::new();
+        let elsewhere = machine.elsewhere("side");
+        let repository = machine.repository_in(&elsewhere, "app", Some(POLICY));
+        machine.tick();
+
+        let status = repository.ralon(&["status"]);
+        let said = stdout(&status);
+        assert!(said.contains("outside every scope"), "{said}");
+        assert!(said.contains("NOT protected"), "{said}");
+        // And the way out, with a real directory in it rather than a placeholder.
+        assert!(
+            said.contains("ralon scope add"),
+            "the fix was not offered: {said}"
+        );
+    }
+
+    #[test]
+    fn scopes_fold_rather_than_overlapping() {
+        let machine = Machine::new();
+        let outer = machine.elsewhere("outer");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+
+        machine.ralon(&["scope", "add", inner.to_str().unwrap()]);
+        // Adding the parent absorbs the child rather than watching both.
+        let broader = machine.ralon(&["scope", "add", outer.to_str().unwrap()]);
+        assert!(
+            stdout(&broader).contains("absorbed"),
+            "{}",
+            stdout(&broader)
+        );
+
+        let listed = stdout(&machine.ralon(&["scope", "list"]));
+        assert!(listed.contains("outer"), "{listed}");
+        assert_eq!(
+            listed.matches("inner").count(),
+            0,
+            "the absorbed scope is still listed: {listed}"
+        );
+
+        // And the child is now covered by the parent, so re-adding is a no-op.
+        let again = machine.ralon(&["scope", "add", inner.to_str().unwrap()]);
+        assert!(
+            stdout(&again).contains("already covered"),
+            "{}",
+            stdout(&again)
+        );
+    }
+
+    #[test]
+    fn equivalent_spellings_of_a_path_are_one_scope() {
+        let machine = Machine::new();
+        let elsewhere = machine.elsewhere("side");
+
+        machine.ralon(&["scope", "add", elsewhere.to_str().unwrap()]);
+
+        // The same directory, spelled differently. Each must resolve to the
+        // scope that already exists rather than adding a second one that does
+        // not recognise the first's repositories.
+        let indirect = elsewhere.join("..").join(
+            elsewhere
+                .file_name()
+                .expect("the scope has a final component"),
+        );
+        let again = machine.ralon(&["scope", "add", indirect.to_str().unwrap()]);
+        assert!(
+            stdout(&again).contains("already covered"),
+            "`{}` was treated as a different directory: {}",
+            indirect.display(),
+            stdout(&again)
+        );
+
+        #[cfg(windows)]
+        {
+            let shouted = elsewhere.to_str().unwrap().to_uppercase();
+            let cased = machine.ralon(&["scope", "add", &shouted]);
+            assert!(
+                stdout(&cased).contains("already covered"),
+                "casing made a second scope on a case-insensitive filesystem: {}",
+                stdout(&cased)
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_directory_inside_a_scope_is_refused_with_a_reason() {
+        let machine = Machine::new();
+        let elsewhere = machine.elsewhere("side");
+        let inner = elsewhere.join("app");
+        fs::create_dir_all(&inner).unwrap();
+        machine.ralon(&["scope", "add", elsewhere.to_str().unwrap()]);
+
+        let attempt = machine.ralon(&["scope", "remove", inner.to_str().unwrap()]);
+        assert_ne!(code(&attempt), 0, "a non-scope was reported as removed");
+        assert!(
+            stderr(&attempt).contains("is inside"),
+            "{}",
+            stderr(&attempt)
+        );
+        // And it really did not remove anything.
+        assert!(
+            stdout(&machine.ralon(&["scope", "list"])).contains("side"),
+            "the scope was dropped anyway"
+        );
+    }
+
+    // A note on drive letters, because the obvious test here is a trap.
+    //
+    // `subst X: <dir>` makes a real drive letter without administrator, and the
+    // first version of these tests used it. It proves less than it looks: a
+    // substituted path canonicalizes straight back to its backing directory, so
+    // `X:\Projects\app` is stored as `C:\...\backing\Projects\app` and every
+    // assertion about "another drive" is really about another directory on the
+    // same one. A test that passes for the wrong reason is worse than no test.
+    //
+    // So the split is deliberate. The cross-drive *semantics* — that `D:\` is
+    // never a prefix of `C:\`, that scopes on separate drives fold and remove
+    // independently — are unit-tested in `supervisor::registry` against literal
+    // `C:\`, `D:\` and `E:\` paths, where the comparison is pure and exact. The
+    // *wiring* is tested here against independent directory trees, which is the
+    // same code path with a real supervisor behind it. Running the whole suite
+    // with `TMP` pointed at a second physical drive exercises both at once.
+
+    #[test]
+    fn a_scope_whose_directory_disappears_does_not_disturb_the_others() {
+        let machine = Machine::new();
+        let removable = machine.elsewhere("removable");
+        machine.ralon(&["scope", "add", removable.to_str().unwrap()]);
+
+        let still_here = machine.repository("local", Some(POLICY));
+        machine.tick();
+        assert!(!still_here.writable(".env"));
+
+        // The shape of an unplugged drive or an unmounted share: the scope is
+        // configured and the directory behind it is gone.
+        fs::remove_dir_all(&removable).unwrap();
+
+        let tick = machine.tick();
+        assert_eq!(code(&tick), 0, "{}", stderr(&tick));
+        assert!(
+            !still_here.writable(".env"),
+            "an unreachable scope released a project under a scope that is fine"
+        );
+        // And it is reported rather than looking like an empty scope.
+        let listed = stdout(&machine.ralon(&["scope", "list"]));
+        assert!(listed.contains("unreachable"), "{listed}");
     }
 
     #[test]

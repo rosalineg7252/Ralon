@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command, HookAction};
+use cli::{Cli, Command, HookAction, ScopeAction};
 
 /// Something went wrong; nothing was enforced.
 const ERROR: u8 = 2;
@@ -58,6 +58,11 @@ fn dispatch() -> Result<ExitCode> {
             no_hooks,
             dry_run,
         } => commands::install(&scope, depth, no_hooks, dry_run),
+        Command::Scope { action } => match action {
+            ScopeAction::Add { directories } => commands::scope_add(&directories),
+            ScopeAction::List => commands::scope_list(),
+            ScopeAction::Remove { directories } => commands::scope_remove(&directories),
+        },
         Command::Uninstall { keep_enforcement } => commands::uninstall(keep_enforcement),
         Command::Pause {
             minutes,

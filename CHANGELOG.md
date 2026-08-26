@@ -18,6 +18,19 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
 
 ### Added
 
+- **`ralon scope add | list | remove`** — the directories your projects live in,
+  managed on their own rather than only as an argument to `install`. Where Ralon
+  is installed now has nothing to do with what it protects: a Windows developer
+  whose code is on `D:\` runs `ralon scope add D:\Projects` and every repository
+  under it is covered. `add` and `remove` reconcile before returning, so the
+  projects really are enforced (or really are released) by the time the command
+  finishes. Scopes are kept disjoint — one inside another reports as covered, one
+  containing others absorbs them — and canonicalized, so `d:\projects` and
+  `D:\Projects` cannot become two scopes that ignore each other's repositories.
+- **`ralon install` names the drives no scope covers**, with the command to fix
+  it. The first-run default is still the home directory, which is on `C:` — and
+  the failure it used to produce was silent: write an `agent.lock` on `D:`, watch
+  nothing happen, and have no reason to suspect that scopes exist.
 - **`ralon install` / `ralon uninstall`** — registers a per-user background
   supervisor with the operating system: a Task Scheduler logon task on Windows, a
   launchd LaunchAgent on macOS. No administrator, no root, and it survives a
@@ -78,6 +91,27 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   supported agents are known to have — with a test that pins them. `Bash` and
   friends are still excluded, still deliberately: a hook cannot tell which paths
   a shell command will touch.
+- **`ralon install` replaced the scope list instead of adding to it**, so
+  re-running it to repair a service registration silently dropped every scope
+  added since. It is now additive, and the home-directory default applies only on
+  a genuinely first run.
+- **A scope added while the supervisor was running was not watched.** The daemon
+  held the registrations it started with, so a new drive waited up to a minute
+  for the sweep — and appeared to work only because the state directory happened
+  to sit under the one scope being watched. The state directory is now registered
+  deliberately, and a write to `config.yaml` is what wakes the supervisor.
+- **Filesystem notifications were acted on indiscriminately.** A registration is
+  recursive and unfiltered, so a scope on a home directory reported every write
+  under `AppData` and the supervisor reconciled on each one. Only `agent.lock`
+  and `config.yaml` can change what should be enforced; the rest is ignored, and
+  the periodic sweep now runs on a deadline rather than a timeout so that
+  continuous activity cannot starve it.
+- **The sweep descended into `AppData`**, which on Windows is most of a home
+  directory by directory count and can hold no projects. It is skipped, along
+  with `Windows`, `Program Files`, `ProgramData` and the recycle bin.
+- **`install` reported every drive as uncovered**, including the one the scopes
+  were on: a canonical Windows path is `\\?\C:\...`, which does not
+  `starts_with("C:\")` under component-wise comparison.
 - **The shared matcher was broader than it needed to be**, which cost a process
   on every matching tool call and, in some Windows terminal hosts, a console
   window that flashes and goes. `apply`, `save`, `modify`, `append`, `mkdir` and

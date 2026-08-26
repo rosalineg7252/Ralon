@@ -62,6 +62,21 @@ pub enum Command {
         dry_run: bool,
     },
 
+    /// Manage the directories your projects live in
+    ///
+    /// A scope is where Ralon will honour an `agent.lock`. Repositories under one
+    /// need no configuration of their own; repositories outside every scope are
+    /// not enforced, and `ralon status` says so rather than looking protected.
+    ///
+    /// Where Ralon is installed has nothing to do with this. If your code is on
+    /// another drive, say so:
+    ///
+    ///   ralon scope add D:\Projects
+    Scope {
+        #[command(subcommand)]
+        action: ScopeAction,
+    },
+
     /// Remove the background supervisor and release everything it holds
     Uninstall {
         /// Deregister the supervisor but leave the current enforcement in place
@@ -183,6 +198,32 @@ pub enum Command {
             allow_hyphen_values = true
         )]
         command: Vec<OsString>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScopeAction {
+    /// Start honouring `agent.lock` under a directory
+    ///
+    /// Takes effect immediately: any project already there with a policy is
+    /// enforced before this command returns.
+    Add {
+        /// Directories to cover. Repeatable.
+        #[arg(value_name = "DIR", required = true)]
+        directories: Vec<PathBuf>,
+    },
+
+    /// Show the scopes, and what is enforced in each
+    List,
+
+    /// Stop honouring `agent.lock` under a directory
+    ///
+    /// Releases every project it was enforcing there, before returning. Must
+    /// name a scope exactly — a directory *inside* one cannot be carved out.
+    Remove {
+        /// Scopes to drop. Repeatable.
+        #[arg(value_name = "DIR", required = true)]
+        directories: Vec<PathBuf>,
     },
 }
 

@@ -100,9 +100,22 @@ pub fn install(
         bail!("{}", service::unsupported_reason());
     }
 
-    let roots = scan_roots(scope)?;
+    let mut supervisor = Supervisor::load()?;
     let executable = std::env::current_exe().context("could not find the ralon executable")?;
     let home = registry::home()?;
+
+    // The home directory is a *first-run* default, not a default applied every
+    // time. Someone whose only scope is D:\Projects has said where their code
+    // is; handing them C:\Users\... back on every re-install would be arguing
+    // with them.
+    let requested = if scope.is_empty() && supervisor.registry().config.roots.is_empty() {
+        vec![registry::user_home().context(
+            "could not find your home directory — pass --scope with a directory instead",
+        )?]
+    } else {
+        scope.to_vec()
+    };
+    let roots = canonical_directories(&requested)?;
 
     if dry_run {
         println!("state      {}", home.display());
@@ -120,8 +133,11 @@ pub fn install(
         return Ok(ExitCode::from(OK));
     }
 
-    let mut supervisor = Supervisor::load()?;
-    supervisor.set_scopes(roots.clone(), depth, !no_hooks)?;
+    // Additive. Re-running `install` must never drop a scope: someone who has
+    // added D:\Projects and then runs `ralon install` again to repair a service
+    // registration would otherwise silently lose it and find out weeks later,
+    // from an agent that edited something it should not have.
+    supervisor.add_scopes(&roots, depth, !no_hooks)?;
 
     // Enforced before the service is registered, and by this process. The
     // developer who just ran `install` is owed protection for the projects that
@@ -135,7 +151,7 @@ pub fn install(
         "wrote      {}",
         supervisor.registry().config_path().display()
     );
-    for root in &roots {
+    for root in &supervisor.registry().config.roots {
         println!("scope      {}", registry::display(root));
     }
     println!("registered {}", registration.mechanism);
@@ -181,7 +197,192 @@ pub fn install(
         println!();
         print_macos_caveat();
     }
+    report_uncovered_drives(&supervisor.registry().config);
     Ok(ExitCode::from(OK))
+}
+
+/// Names the drives no scope reaches, and how to cover them.
+///
+/// Windows only, and it exists because of one specific way this tool used to
+/// fail people: the first-run default scope is the home directory, the home
+/// directory is on `C:`, and a great many developers keep their repositories on
+/// `D:` or `E:`. Those people wrote an `agent.lock`, watched nothing happen, and
+/// had no reason to suspect that a scope was a concept.
+///
+/// Nothing here is scanned or assumed — the drives are listed and the command is
+/// printed, and the developer decides.
+fn report_uncovered_drives(config: &registry::Config) {
+    // Compared as displayed, not as `Path`s. A canonical scope on Windows is
+    // `\\?\C:\Users\me\code`, and `Path::starts_with` compares components — so
+    // it does not start with `C:\`, and every drive read as uncovered including
+    // the one the scopes are on. Caught by a test whose output listed a `C:`
+    // scope and then advised covering `C:`.
+    let covered: Vec<String> = config
+        .roots
+        .iter()
+        .map(|root| registry::display(root))
+        .collect();
+    let uncovered: Vec<_> = supervisor::volumes::fixed_roots()
+        .into_iter()
+        .filter(|drive| {
+            let drive = registry::display(drive);
+            !covered.iter().any(|root| root.starts_with(&drive))
+        })
+        .collect();
+    if uncovered.is_empty() {
+        return;
+    }
+
+    println!();
+    let drives = uncovered
+        .iter()
+        .map(|drive| registry::display(drive))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("No scope covers {drives} — an {POLICY_FILE} there is not enforced.");
+    println!("If that is where you keep code:");
+    println!(
+        "  ralon scope add {}Projects",
+        registry::display(&uncovered[0])
+    );
+}
+
+/// Starts honouring `agent.lock` under a directory.
+pub fn scope_add(directories: &[PathBuf]) -> Result<ExitCode> {
+    let mut supervisor = Supervisor::load()?;
+
+    for directory in canonical_directories(directories)? {
+        match supervisor.add_scope(directory.clone()) {
+            registry::ScopeChange::Added { replaced } => {
+                println!("scope      {}", registry::display(&directory));
+                for absorbed in replaced {
+                    println!("  absorbed {}", registry::display(&absorbed));
+                }
+                warn_about_a_whole_drive(&directory);
+            }
+            registry::ScopeChange::AlreadyCovered { by } => {
+                println!(
+                    "already covered by {} — nothing to do",
+                    registry::display(&by)
+                );
+            }
+        }
+    }
+    supervisor.save_config()?;
+
+    // Reconciled here rather than left to the supervisor's next pass, so that
+    // when this command returns the projects under the new scope really are
+    // enforced — and if one of them cannot be, it is said now, to the person
+    // standing here, rather than into a log.
+    let actions = supervisor.tick(true)?;
+    let started = actions
+        .iter()
+        .filter(|action| matches!(action, supervisor::Action::Begin(_)))
+        .count();
+    println!("enforcing  {}", count(started, "project", "projects"));
+
+    if !service::installed() {
+        println!();
+        println!("The supervisor is not installed, so nothing will pick up changes here");
+        println!("automatically: `ralon install`.");
+    }
+    Ok(ExitCode::from(OK))
+}
+
+/// Stops honouring `agent.lock` under a directory, releasing what it held.
+pub fn scope_remove(directories: &[PathBuf]) -> Result<ExitCode> {
+    let mut supervisor = Supervisor::load()?;
+    let mut removed = false;
+
+    for directory in directories {
+        // Canonicalized when it can be, so `d:\projects` matches the stored
+        // `D:\Projects` — and falling back to the path as given, because a scope
+        // on a drive that has since been unplugged still has to be removable.
+        let canonical = std::fs::canonicalize(directory).unwrap_or_else(|_| directory.clone());
+        if supervisor.remove_scope(&canonical) {
+            println!("dropped    {}", registry::display(&canonical));
+            removed = true;
+        } else {
+            let covering = supervisor
+                .registry()
+                .config
+                .covering(&canonical)
+                .map(registry::display);
+            match covering {
+                Some(scope) => bail!(
+                    "{} is not a scope — it is inside {scope}. Scopes are whole trees; \
+                     remove {scope}, or leave it and let the policy files decide.",
+                    registry::display(&canonical)
+                ),
+                None => bail!("{} is not a scope", registry::display(&canonical)),
+            }
+        }
+    }
+    supervisor.save_config()?;
+
+    if removed {
+        // The projects under a dropped scope are no longer discoverable, so
+        // reconciliation sees them as gone and releases them. Done here so the
+        // files are writable by the time this returns.
+        let actions = supervisor.tick(true)?;
+        let released = actions
+            .iter()
+            .filter(|action| matches!(action, supervisor::Action::End(_)))
+            .count();
+        println!("released   {}", count(released, "project", "projects"));
+    }
+    Ok(ExitCode::from(OK))
+}
+
+/// Shows the scopes and what is enforced in each.
+pub fn scope_list() -> Result<ExitCode> {
+    let supervisor = Supervisor::load()?;
+    let registry = supervisor.registry();
+
+    if registry.config.roots.is_empty() {
+        println!("No scopes. Nothing will be enforced anywhere.");
+        println!("  ralon scope add <DIR>");
+        return Ok(ExitCode::from(OK));
+    }
+
+    for root in &registry.config.roots {
+        let enforced = registry
+            .workspaces
+            .iter()
+            .filter(|entry| entry.root.starts_with(root))
+            .count();
+        // A scope on a drive that is not currently mounted is not an error and
+        // not a working scope either, and the difference is worth a word.
+        let reachable = root.is_dir();
+        println!(
+            "{}  {}{}",
+            registry::display(root),
+            count(enforced, "project", "projects"),
+            if reachable { "" } else { "  (unreachable)" }
+        );
+        for entry in &registry.workspaces {
+            if entry.root.starts_with(root) {
+                println!("  {}", registry::display(&entry.root));
+            }
+        }
+    }
+
+    report_uncovered_drives(&registry.config);
+    Ok(ExitCode::from(OK))
+}
+
+/// A scope on a whole drive is legal and rarely meant.
+fn warn_about_a_whole_drive(directory: &Path) {
+    if directory.parent().is_some() {
+        return;
+    }
+    eprintln!(
+        "ralon: warning: {} is an entire drive. Discovery is bounded — it stops at \
+         {} levels and skips dependency and system directories — but a directory \
+         nearer your projects is faster and says more clearly what you meant.",
+        registry::display(directory),
+        registry::DEFAULT_MAX_DEPTH
+    );
 }
 
 /// Undoes `install`, including everything it is currently holding.
@@ -280,32 +481,34 @@ pub fn daemon(foreground: bool, once: bool, home: Option<PathBuf>) -> Result<Exi
     Ok(ExitCode::from(OK))
 }
 
-/// The scopes `install` will honour a policy in, checked before anything is
-/// written.
-fn scan_roots(requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let requested: Vec<PathBuf> = if requested.is_empty() {
-        // The home directory, because a developer's repositories are somewhere
-        // under it and asking which subdirectory is a question most people
-        // would answer with "all of them".
-        vec![registry::user_home().context(
-            "could not find your home directory — pass --scope with a directory instead",
-        )?]
-    } else {
-        requested.to_vec()
-    };
-
-    let mut roots = Vec::new();
-    for root in requested {
-        let canonical = std::fs::canonicalize(&root)
-            .with_context(|| format!("cannot watch {} — no such directory", root.display()))?;
+/// Canonical, existing directories, checked before anything is written.
+///
+/// Canonicalization is what makes the rest of the scope model work rather than
+/// being a tidiness step. `covers()` compares components and is case-sensitive,
+/// which is only correct because both sides have already been resolved to
+/// whatever the filesystem calls them — so `d:\projects`, `D:\Projects\.`, and a
+/// path reached through a junction all become one scope here, or they become
+/// three scopes that do not recognise each other's repositories.
+fn canonical_directories(requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut directories = Vec::new();
+    for path in requested {
+        let canonical = std::fs::canonicalize(path).with_context(|| {
+            format!(
+                "cannot use {} as a scope — no such directory",
+                path.display()
+            )
+        })?;
         if !canonical.is_dir() {
-            bail!("cannot watch {} — it is not a directory", root.display());
+            bail!(
+                "cannot use {} as a scope — it is not a directory",
+                path.display()
+            );
         }
-        if !roots.contains(&canonical) {
-            roots.push(canonical);
+        if !directories.contains(&canonical) {
+            directories.push(canonical);
         }
     }
-    Ok(roots)
+    Ok(directories)
 }
 
 /// The project root for `pause` and `resume`, canonical so it matches what the
@@ -726,10 +929,15 @@ fn report_supervisor(policy: &Policy) {
     println!("log        {}", registry.log_path().display());
 
     if !registry.config.covers(&root) {
+        // The policy is here and it is doing nothing. That is the one state this
+        // tool must never let look like protection, so it is said plainly and
+        // followed by the command that fixes it — with a real parent directory
+        // in it, not a placeholder.
+        println!("workspace  policy found, but this project is outside every scope");
+        println!("           it is NOT protected. To cover it:");
         println!(
-            "workspace  outside every declared scope, so the supervisor will not \
-             enforce it\n           (`ralon install --scope {}`)",
-            registry::display(&root)
+            "             ralon scope add {}",
+            registry::display(root.parent().unwrap_or(&root))
         );
         return;
     }

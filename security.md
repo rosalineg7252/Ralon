@@ -305,12 +305,21 @@ developer would have started by hand, so nothing about it is easier to bypass
 than `ralon guard` is. What has to be examined is the discovery, not the
 enforcement.
 
-- **`agent.lock` grants nothing by existing.** Only paths inside a registered
-  scan root are considered, so a policy file arriving inside a downloaded archive
-  or a dependency's source tree is inert. Being found is a permission the
-  developer gives to a directory, by name, once. The check is applied to what the
-  filesystem watcher reports as well as to the sweep, so a notification cannot
-  introduce a workspace the configuration does not allow.
+- **`agent.lock` grants nothing by existing.** Only paths inside a declared scope
+  are considered, so a policy file arriving inside a downloaded archive or a
+  dependency's source tree is inert. Being honoured is a permission the developer
+  gives to a directory, by name, once. The check is applied to what the filesystem
+  notification reports as well as to the sweep, so an event cannot introduce a
+  workspace the configuration does not allow.
+- **A broad scope is a convenience question, not a security one.** Scopes are
+  arbitrary directories and may be as wide as a whole drive. What that permits is
+  bounded by the policy format rather than by the scope: patterns are relative to
+  the file that declares them and `..`, absolute paths, `~` and `!` are rejected,
+  so the most a hostile `agent.lock` can achieve by being found is making *its
+  own directory* read-only until someone removes it. It cannot name a path
+  elsewhere on the machine, a backend, a command, or a privilege level. Adding a
+  drive root is warned about because discovery gets slower, not because it opens
+  a hole.
 - **The policy is data, not configuration of Ralon.** It names patterns relative
   to itself and cannot select a backend, a command, a privilege level, or a path
   outside its own project — `..`, absolute paths, `~` and `!` are rejected by the

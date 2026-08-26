@@ -102,8 +102,8 @@ on a machine that cannot enforce it — so only syscalls live under a platform
 directory. A new platform is a new directory exposing `availability()` and
 `enforce_and_exec()`; a new agent is a new file in `hook/`.
 
-Commands: `ralon install | uninstall | pause | resume | daemon | init | check |
-status | hook install | guard | run`.
+Commands: `ralon install | uninstall | scope add|list|remove | pause | resume |
+daemon | init | check | status | hook install | guard | run`.
 
 ## The supervisor
 
@@ -132,6 +132,18 @@ considered, so a policy file inside a downloaded archive is inert.
 Workspace identity is the canonical path, and that is load-bearing: the Windows
 guard's claim is a hash of it, so two spellings of one directory are two projects
 that cannot see each other.
+
+Scopes are the directories a policy is honoured in, kept **disjoint** and
+canonical by `Config::add`. Where Ralon is installed must never decide what it
+protects — a home directory on `C:` says nothing about a repository on `D:`, and
+`ralon scope add` is the answer rather than a wider default. `add`/`remove`
+reconcile before returning; removal needs no release logic because the sweep
+stops returning those workspaces and `reconcile` already ends them.
+
+Two things about notifications, both learned from a bug: only `agent.lock` and
+`config.yaml` may trigger a reconcile — a registration is recursive and
+unfiltered, so anything else means reconciling on every write under `AppData` —
+and the sweep runs on a deadline, not a timeout, so activity cannot starve it.
 
 macOS `guard`/supervisor use `chflags uchg`, which **reverses** the earlier
 decision recorded in `unguarded.rs` not to implement it. Keep it labelled as what

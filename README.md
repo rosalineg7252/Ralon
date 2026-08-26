@@ -77,14 +77,41 @@ never heard of Ralon. `ralon status` says which one you are getting and why.
 **Windows and macOS.**
 
 ```console
-$ ralon install                # your home directory is the default scope
-$ ralon install --scope ~/code --scope ~/work    # or name the directories yourself
+$ ralon install                # register the supervisor
+$ ralon scope add D:\Projects  # and say where your code actually is
+$ ralon scope add E:\Work
 ```
 
-That registers a per-user background supervisor with the operating system — a
-Task Scheduler logon task on Windows, a launchd LaunchAgent on macOS — and
-records which directories your projects live in. No administrator, no root, and
-it comes back after a reboot because the operating system starts it.
+`install` registers a per-user background supervisor with the operating system —
+a Task Scheduler logon task on Windows, a launchd LaunchAgent on macOS. No
+administrator, no root, and it comes back after a reboot because the operating
+system starts it.
+
+**Where Ralon is installed has nothing to do with what it protects.** On a first
+run with no scope given it takes your home directory, because that is right often
+enough to be a useful start — but plenty of Windows developers keep repositories
+on `D:\` or `E:\`, and a home directory on `C:` says nothing about those.
+`install` lists any fixed drive no scope reaches and prints the command:
+
+```console
+No scope covers D:\ — an agent.lock there is not enforced.
+If that is where you keep code:
+  ralon scope add D:\Projects
+```
+
+Managing scopes:
+
+```console
+$ ralon scope add D:\Projects     # takes effect before the command returns
+$ ralon scope list                # every scope, and what is enforced in each
+$ ralon scope remove D:\Projects  # releases its repositories on the way out
+```
+
+Scopes are whole trees and are kept disjoint. Adding one inside an existing scope
+tells you it is already covered; adding one that contains existing scopes absorbs
+them. Equivalent spellings — `d:\projects`, `D:\Projects\.`, a path through a
+junction — resolve to a single scope, so they cannot end up as two that do not
+recognise each other's repositories.
 
 A scope is a boundary, not a surveillance area: it is the answer to "why doesn't
 an `agent.lock` inside a downloaded archive lock files on my machine". Ralon
@@ -132,9 +159,14 @@ state — so it is safe to commit and identical on every machine that checks the
 repository out. The supervisor never writes to it.
 
 It also grants nothing by existing. A policy is honoured only inside a scope you
-named with `ralon install`, so an `agent.lock` inside a downloaded archive or a
-dependency's source tree protects nothing and locks nothing: being *honoured* is
-a permission the developer gives once, to a directory, by name.
+named, so an `agent.lock` inside a downloaded archive or a dependency's source
+tree protects nothing and locks nothing: being *honoured* is a permission the
+developer gives once, to a directory, by name.
+
+Even inside a scope the blast radius is small. Patterns are relative to the
+policy file and `..`, absolute paths and `~` are rejected, so the worst a hostile
+`agent.lock` can do is make its own directory read-only — which is why a broad
+scope is a convenience question rather than a security one.
 
 ### Where the logs are
 
@@ -226,7 +258,8 @@ defeatable for exactly that reason.
 | Ralon is not installed | Nothing is enforced. `agent.lock` is an ordinary file. |
 | The supervisor is stopped or was never started | Projects it had already enforced **stay** enforced on macOS (the flag is on disk) and are **released** on Windows (the locks die with the process). `ralon status` reports both cases separately. |
 | `agent.lock` is malformed | That project is not enforced, and says so: `ralon status` exits 2 and names the line. Nothing is half-applied, and a policy that cannot be read locks nothing rather than locking everything. |
-| The project is outside every declared scope | Not enforced. `ralon status` says so and prints the `--scope` that would fix it. |
+| The project is outside every scope | Not enforced, and `ralon status` says exactly that — `policy found, but this project is outside every scope … it is NOT protected` — followed by the `ralon scope add` that covers it. |
+| A scope's directory is gone (drive unplugged, share unmounted) | Everything else carries on. `ralon scope list` marks it `(unreachable)`. |
 | The agent hook is missing | Still enforced — the agent just sees the filesystem's own error (`EBUSY`, `Access is denied`, `EPERM`) rather than being told why. `ralon hook install` fixes it. |
 | A console window flashes on Windows when the agent edits a file | Your agent is spawning `ralon hook check` without hiding the window — a spawn flag Ralon does not control. Nothing Ralon starts in the background has a window: the supervisor's console is headless and guards are created detached. `ralon install --no-hooks`, or `ralon hook install --agent <one>`, reduces how often it is spawned; enforcement is unaffected either way. |
 | `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |

@@ -27,18 +27,19 @@
 
 pub mod registry;
 pub mod single;
+pub mod volumes;
 pub mod watch;
 
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
 use crate::enforce::{self, Backend, Plan};
 use crate::matcher::Matcher;
-use crate::policy::Policy;
+use crate::policy::{Policy, POLICY_FILE};
 use crate::scan;
 use registry::{Registry, State, Workspace};
 
@@ -220,18 +221,39 @@ impl Supervisor {
         Ok(Vec::new())
     }
 
-    /// Records the declared scopes, keeping everything already known.
-    pub fn set_scopes(
+    /// Adds scopes without disturbing the ones already declared.
+    ///
+    /// Additive on purpose — see the note at the call site in `install`. Returns
+    /// what each one did, so the caller can report "absorbed three narrower
+    /// scopes" rather than leaving the developer to compare `scope list` before
+    /// and after.
+    pub fn add_scopes(
         &mut self,
-        roots: Vec<PathBuf>,
+        roots: &[PathBuf],
         depth: Option<usize>,
         hooks: bool,
-    ) -> Result<()> {
-        self.registry.config.roots = roots;
+    ) -> Result<Vec<registry::ScopeChange>> {
+        let changes = roots
+            .iter()
+            .map(|root| self.registry.config.add(root.clone()))
+            .collect();
         self.registry.config.hooks = hooks;
         if let Some(depth) = depth {
             self.registry.config.max_depth = depth;
         }
+        self.registry.save_config()?;
+        Ok(changes)
+    }
+
+    pub fn add_scope(&mut self, root: PathBuf) -> registry::ScopeChange {
+        self.registry.config.add(root)
+    }
+
+    pub fn remove_scope(&mut self, root: &Path) -> bool {
+        self.registry.config.remove(root)
+    }
+
+    pub fn save_config(&self) -> Result<()> {
         self.registry.save_config()
     }
 
@@ -443,21 +465,81 @@ impl Supervisor {
 pub fn run(supervisor: &mut Supervisor) -> Result<()> {
     let _claim = single::claim().context("another Ralon supervisor is already running")?;
 
-    let mut watcher = watch::start(&supervisor.registry.config.roots);
+    // Canonical, so the "is it already inside a scope" test below compares like
+    // with like. Scopes are canonical and `RALON_HOME` is whatever was typed —
+    // on Windows that is `\\?\C:\...` against `C:\...`, which never matches, and
+    // the state directory was registered a second time on top of the scope that
+    // already contained it: two sets of handles and threads reporting the same
+    // events.
+    let state = supervisor.registry.home().to_path_buf();
+    let state = std::fs::canonicalize(&state).unwrap_or(state);
+    let mut watched = supervisor.registry.config.roots.clone();
+    let mut watcher = watch::start(&registrations(&watched, &state));
     supervisor.say(&format!("supervisor started — {}", watcher.describe()));
 
     // Before waiting on anything: the state on disk may have moved on while no
     // supervisor was running, and after a reboot this pass is the whole job.
     supervisor.tick(true)?;
+    let mut swept = Instant::now();
 
     loop {
-        let changed = watcher.changes(SWEEP_INTERVAL);
-        if changed.is_empty() {
+        // The remaining slice of the sweep interval, not the whole of it. A
+        // scope with any activity in it produces a steady trickle of
+        // notifications, and waiting the full interval after each one would mean
+        // the periodic sweep never runs on a machine that is being used — which
+        // is the machine it exists for.
+        let changed = watcher.changes(SWEEP_INTERVAL.saturating_sub(swept.elapsed()));
+
+        // Two files decide what should be enforced, and everything else under a
+        // scope is noise: a build, a `git checkout`, an editor writing a
+        // temporary file. Filtering here rather than reconciling on every event
+        // is what makes a scope on a home directory affordable — `AppData` alone
+        // is written to continuously by software that has nothing to do with
+        // this, and a full sweep per notification made the supervisor busy
+        // whenever the developer was.
+        let policy = changed.iter().any(|path| named(path, POLICY_FILE));
+        let scopes = changed
+            .iter()
+            .any(|path| named(path, registry::CONFIG_FILE));
+
+        if scopes || swept.elapsed() >= SWEEP_INTERVAL {
             supervisor.tick(true)?;
-        } else {
+            swept = Instant::now();
+        } else if policy {
             supervisor.tick_for(&changed)?;
         }
+
+        // `ralon scope add D:\Projects` writes the configuration, and the state
+        // directory is registered above precisely so that write arrives here.
+        // Without it a supervisor would hold the registrations it started with
+        // and every project on the new drive would wait for the sweep — which is
+        // what happened, and only looked like it worked because the state
+        // directory happened to sit under the one scope being watched.
+        //
+        // The replacement is built before the old one is dropped, so both exist
+        // for an instant. That is fine — two read-only registrations on the same
+        // directory do not conflict — and the old handles and threads go as soon
+        // as the assignment completes.
+        if supervisor.registry.config.roots != watched {
+            watched = supervisor.registry.config.roots.clone();
+            watcher = watch::start(&registrations(&watched, &state));
+            supervisor.say(&format!("scopes changed — {}", watcher.describe()));
+        }
     }
+}
+
+/// The scopes, plus the state directory so the supervisor hears about its own
+/// configuration changing.
+fn registrations(roots: &[PathBuf], state: &Path) -> Vec<PathBuf> {
+    let mut all = roots.to_vec();
+    if !all.iter().any(|root| state.starts_with(root)) {
+        all.push(state.to_path_buf());
+    }
+    all
+}
+
+fn named(path: &Path, name: &str) -> bool {
+    path.file_name().is_some_and(|actual| actual == name)
 }
 
 fn open_log(registry: &Registry) -> Option<std::fs::File> {
