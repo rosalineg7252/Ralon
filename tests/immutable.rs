@@ -28,8 +28,10 @@ struct Project {
 impl Project {
     fn new() -> Project {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
+        // Deliberately does not contain the name of the flag being tested for.
+        // See `flagged` below for why that sentence had to be written down.
         let root = std::env::temp_dir().join(format!(
-            "ralon-uchg-{}-{}",
+            "ralon-flags-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -84,13 +86,27 @@ impl Drop for Project {
     }
 }
 
+/// Whether `path` carries `uchg`, asked of the filesystem rather than inferred
+/// from a listing.
+///
+/// `stat -f %Sf` prints the flags and nothing else. The first version of this
+/// ran `ls -ldO` and searched the whole line for `uchg` — and `ls` prints the
+/// path it was given, which lived under a temporary directory this file used to
+/// name `ralon-uchg-<pid>`. Every path "carried the flag", including the ones
+/// asserted not to; three tests failed and the rest passed for no reason at all.
+/// The lesson is the one in CLAUDE.md, one level up: check the property, not
+/// something that mentions it.
 fn flagged(path: &Path) -> bool {
-    let listing = Command::new("ls")
-        .args(["-ldO"])
+    let flags = Command::new("stat")
+        .args(["-f", "%Sf"])
         .arg(path)
         .output()
-        .expect("failed to run ls");
-    String::from_utf8_lossy(&listing.stdout).contains("uchg")
+        .expect("failed to run stat");
+    // Comma-separated when there is more than one, empty when there are none.
+    String::from_utf8_lossy(&flags.stdout)
+        .trim()
+        .split(',')
+        .any(|flag| flag == "uchg")
 }
 
 // ---------------------------------------------------------------------------
@@ -228,31 +244,69 @@ fn an_agent_can_undo_it_which_is_why_this_is_not_a_sandbox() {
 }
 
 #[test]
-fn renaming_a_parent_directory_moves_the_path_out_from_under_the_policy() {
-    // Documented in `immutable.rs`: ancestors are not pinned, because pinning
-    // them means the project can never have a new file written anywhere in it.
-    // The contents stay immutable; the path the policy named stops referring to
-    // them.
+fn a_protected_directory_cannot_itself_be_renamed() {
+    // Stronger than `immutable.rs` claimed, and worth pinning down. A protected
+    // *directory* carries the flag in its own right, and an immutable directory
+    // cannot be renamed or removed — so the gap below does not apply to it. The
+    // first version of this file assumed otherwise and asserted that `mv config
+    // config-moved` succeeded; the macOS job disagreed, and it was right.
     let project = Project::new();
     project.ralon(&["guard", "--detach"]);
 
     project.attack("mv config config-moved");
     assert!(
-        project.path("config-moved").exists(),
-        "the parent rename was refused — if this now fails, ancestors are being \
-         pinned after all and immutable.rs is out of date"
+        !project.path("config-moved").exists(),
+        "a protected directory was renamed"
+    );
+    assert!(
+        project.path("config").is_dir(),
+        "a protected directory went missing"
+    );
+}
+
+#[test]
+fn renaming_an_unprotected_ancestor_moves_the_path_out_from_under_the_policy() {
+    // The real gap, documented in `immutable.rs`: ancestors that are not
+    // themselves protected are not pinned, because pinning them would stop the
+    // project ever having a new file written anywhere inside. The contents stay
+    // immutable; the path the policy named stops referring to them.
+    //
+    // `src/deep/` is the ancestor here — the policy names only the file inside
+    // it, so nothing flags the directory.
+    let project = Project::new();
+    fs::create_dir_all(project.path("src/deep")).unwrap();
+    fs::write(project.path("src/deep/secret.txt"), "original").unwrap();
+    fs::write(
+        project.path("agent.lock"),
+        "version: 1\nprotect:\n  - src/deep/secret.txt\n",
+    )
+    .unwrap();
+    project.ralon(&["guard", "--detach"]);
+    assert!(flagged(&project.path("src/deep/secret.txt")));
+    assert!(
+        !flagged(&project.path("src/deep")),
+        "the ancestor was flagged, so this test is no longer about the gap it names"
     );
 
-    // The file itself is still protected, which is the part that holds.
-    project.attack("echo pwned > config-moved/db.yaml");
-    assert_eq!(project.contents("config-moved/db.yaml"), "original");
+    project.attack("mv src/deep src/moved");
+    assert!(
+        project.path("src/moved").exists(),
+        "the ancestor rename was refused — if ancestors are pinned now, \
+         immutable.rs is out of date"
+    );
+
+    // The contents are still protected, which is the half that holds.
+    project.attack("echo pwned > src/moved/secret.txt");
+    assert_eq!(project.contents("src/moved/secret.txt"), "original");
 }
 
 #[test]
 fn a_path_that_cannot_be_flagged_is_reported_and_never_silently_skipped() {
     let project = Project::new();
-    // A policy naming something on a filesystem that has no flags to set. macOS
-    // mounts `/dev` as devfs, which refuses `chflags`.
+    // A policy naming a path that is not on disk. Nothing can be flagged for it,
+    // so the developer is told — otherwise `--detach` prints "every process on
+    // this machine is now refused those paths" over a list that quietly has one
+    // fewer path in it than the policy does.
     fs::write(
         project.path("agent.lock"),
         "version: 1\nprotect:\n  - .env\n  - missing.txt\n",

@@ -91,6 +91,12 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   supported agents are known to have — with a test that pins them. `Bash` and
   friends are still excluded, still deliberately: a hook cannot tell which paths
   a shell command will touch.
+- **`ralon guard --detach` never warned about a policy naming paths that are not
+  on disk.** The foreground `ralon guard` did; the detached branch returned
+  before reaching it. So `--detach` printed "every process on this machine is now
+  refused those paths" over a list quietly one path shorter than the policy, and
+  the developer had no way to find out. Found by the macOS CI job, and it was
+  present on Windows too.
 - **`ralon install` replaced the scope list instead of adding to it**, so
   re-running it to repair a service registration silently dropped every scope
   added since. It is now additive, and the home-directory default applies only on
@@ -136,6 +142,26 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   canonicalized did not refer to the same project. Workspace identity is now
   canonicalized where the path enters the system.
 - Canonical Windows paths are no longer printed in their verbatim `\\?\` form.
+
+### A note on the macOS tests
+
+`tests/immutable.rs` had never run when it was written — there is no container
+for macOS — and the first CI run failed five of its ten tests. Four were the
+tests being wrong, in two ways worth recording.
+
+`flagged()` ran `ls -ldO` and searched the output for `uchg`, and the temporary
+directory was named `ralon-uchg-<pid>`. `ls` prints the path it was given, so
+every path "carried the flag": three assertions failed and the rest passed for no
+reason at all. It now asks `stat -f %Sf`, which prints the flags and nothing
+else, and the directory no longer contains the name of the thing being tested
+for.
+
+The other was a real correction to the documentation. `immutable.rs` said
+ancestors are not pinned, and a test asserted that renaming a protected
+directory therefore succeeded. It does not: a protected directory carries the
+flag in its own right, and an immutable directory cannot be renamed or removed.
+The gap is narrower than claimed — it applies to ancestors that are not
+themselves protected — and both halves now have a test.
 
 ### A note on the tests
 

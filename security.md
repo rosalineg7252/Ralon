@@ -210,11 +210,16 @@ here cannot drift:
   command. This is a narrowing, not a sandbox, and **it is not equivalent to
   process-level sandboxing**. `run` is: a Seatbelt profile cannot be dropped,
   inspected, or lifted by the process it applies to.
-- **Ancestors are not pinned.** Renaming a parent directory succeeds. The file
-  stays immutable — its contents are still protected — but the path `agent.lock`
-  named no longer refers to it. Closing this would mean making ancestors
-  immutable, which stops the project accepting a new file anywhere, so the gap is
-  left open and named instead. `run` pins ancestors and does not have it.
+- **Unprotected ancestors are not pinned.** Renaming a directory *above* a
+  protected file succeeds. The file stays immutable — its contents are still
+  protected — but the path `agent.lock` named no longer refers to it. Closing
+  this would mean making every ancestor immutable, which stops the project
+  accepting a new file anywhere, so the gap is left open and named instead.
+  `run` pins ancestors and does not have it.
+
+  A protected *directory* is not affected: it carries the flag itself and cannot
+  be renamed or removed. Both halves are asserted in `tests/immutable.rs`, one of
+  them because the macOS CI job caught this document overstating the gap.
 - **It leaves state behind.** A supervisor that is killed cannot clear the flags,
   so they stay set. That fails *closed* — the files remain protected — and is the
   opposite failure mode from Windows, where a killed guard loses protection.

@@ -22,11 +22,16 @@
 //! - It is **not process-level sandboxing** and is not equivalent to `ralon run`.
 //!   `run` applies a Seatbelt profile that the agent cannot drop, cannot see, and
 //!   cannot ask the kernel to lift. This is a bit in an inode.
-//! - It **does not pin ancestors.** A protected file stays immutable if its
-//!   parent directory is renamed, but the *path* the policy named no longer
-//!   refers to it. Making an ancestor immutable would close that and stop the
-//!   project having any new files written anywhere in it, which is not a trade
-//!   worth making silently.
+//! - It **does not pin unprotected ancestors.** A protected file stays immutable
+//!   if a directory above it is renamed, but the *path* the policy named no
+//!   longer refers to it. Making every ancestor immutable would close that and
+//!   stop the project having any new files written anywhere in it, which is not
+//!   a trade worth making silently.
+//!
+//!   A protected *directory* is not subject to this: it carries the flag itself,
+//!   and an immutable directory cannot be renamed or removed. That is stronger
+//!   than this file first claimed — the macOS CI job caught the overstatement by
+//!   failing a test that asserted the rename succeeded.
 //!
 //! What it does buy is real, and is why it beats nothing: every ordinary write
 //! fails. Editors, `>` redirects, `rm`, `mv`, `sed -i`, every agent's edit tool,

@@ -566,6 +566,16 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
         );
         println!("every process on this machine is now refused those paths");
         println!("stop it with: ralon guard --stop");
+
+        // Said here as well as in the foreground path, which used to be the only
+        // one that said it. A pattern matching nothing on disk protects nothing,
+        // and `--detach` reporting a running guard and then falling silent about
+        // it is the exact shape of failure this program exists to prevent — the
+        // developer reads "every process is now refused those paths" and has no
+        // way to learn that one of the paths was never among them.
+        warn_about_unmatched(&policy, &found);
+        warn_about_weaknesses(&policy, &found);
+
         println!();
         print_what_a_refusal_looks_like();
         return Ok(ExitCode::from(OK));

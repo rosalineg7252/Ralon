@@ -222,6 +222,13 @@ the tested limitations, `publishing.md` for release steps.
   failed, `>` returns 0 when it was refused, and `SetEntriesInAcl` returned
   `ERROR_SUCCESS` while changing nothing. Two bugs here were "attack refused"
   reported by a check that never looked at the file. Read the file back.
+- **Check the property, not something that mentions it.** The same family, one
+  level up. `flagged()` searched `ls -ldO` output for `uchg` while the temp
+  directory was named `ralon-uchg-<pid>`, so every path carried the flag; the
+  Windows attack helper passed a quoted path to `cmd` through `Command::arg`,
+  which escapes `"` as `\"`, so the redirect never ran and an unchanged file read
+  as a refusal. Both would have passed against a Ralon that enforced nothing.
+  Prove the control case too: that the write *succeeds* before the policy applies.
 - Never let a failure to enforce be silent. If no backend is available, `run`
   refuses to start the command rather than running it unprotected — and says
   what to do instead, because "unavailable" on its own lets the reader conclude

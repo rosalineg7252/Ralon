@@ -370,10 +370,12 @@ command starts, so `umount` and bind-mount tricks fail from inside.
   exist. On macOS the opposite: the flag survives everything, including Ralon
   being killed, which is why a killed supervisor leaves state behind rather than
   losing protection.
-- **The macOS supervisor does not pin ancestors.** A protected file stays
-  immutable if its parent directory is renamed, but the path the policy named no
-  longer refers to it. Making an ancestor immutable would stop the project ever
-  having a new file written anywhere in it. `ralon run` does not have this gap.
+- **The macOS supervisor does not pin unprotected ancestors.** A protected file
+  stays immutable if a directory *above* it is renamed, but the path the policy
+  named no longer refers to it. Making every ancestor immutable would stop the
+  project ever having a new file written anywhere in it. A protected *directory*
+  is unaffected — it carries the flag itself and cannot be renamed. `ralon run`
+  has neither gap.
 - **Only what exists.** A protected path that is not on disk yet cannot be
   bind-mounted. `status` and `run` warn about patterns matching nothing. (Under
   the landlock backend such paths cannot be created at all, which is stricter.)
