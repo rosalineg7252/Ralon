@@ -8,7 +8,18 @@
     "url": "git+https://github.com/stoneware-dev/Ralon.git"
   },
   "homepage": "https://github.com/stoneware-dev/Ralon#readme",
-  "keywords": ["ai", "agent", "sandbox", "landlock", "security"],
+  "keywords": [
+    "ai",
+    "agent",
+    "sandbox",
+    "landlock",
+    "seatbelt",
+    "security",
+    "agent.lock",
+    "claude",
+    "cursor",
+    "copilot"
+  ],
   "bin": {
     "ralon": "bin/ralon.js"
   },
