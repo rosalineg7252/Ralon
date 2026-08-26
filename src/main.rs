@@ -9,6 +9,8 @@ mod hook;
 mod matcher;
 mod policy;
 mod scan;
+mod service;
+mod supervisor;
 
 use std::process::ExitCode;
 
@@ -50,6 +52,22 @@ fn dispatch() -> Result<ExitCode> {
     };
 
     match cli.command {
+        Command::Install {
+            watch,
+            depth,
+            dry_run,
+        } => commands::install(&watch, depth, dry_run),
+        Command::Uninstall { keep_enforcement } => commands::uninstall(keep_enforcement),
+        Command::Pause {
+            minutes,
+            indefinitely,
+        } => commands::pause(&directory, minutes, indefinitely),
+        Command::Resume => commands::resume(&directory),
+        Command::Daemon {
+            foreground,
+            once,
+            home,
+        } => commands::daemon(foreground, once, home),
         Command::Init { force, no_hooks } => commands::init(&directory, force, no_hooks),
         Command::Check { paths } => commands::check(&directory, &paths),
         Command::Status => commands::status(&directory),

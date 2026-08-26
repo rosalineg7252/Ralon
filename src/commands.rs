@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::audit;
 use crate::cli::Agent;
@@ -13,6 +13,8 @@ use crate::hook;
 use crate::matcher::{relative_path, Matcher};
 use crate::policy::{self, Policy, POLICY_FILE};
 use crate::scan::{self, ProtectedPath};
+use crate::service;
+use crate::supervisor::{self, registry, single, Supervisor};
 
 pub const OK: u8 = 0;
 /// A path the policy protects, or a command the policy stopped.
@@ -86,6 +88,223 @@ fn print_what_a_refusal_looks_like() {
     println!("hook installed are told that in words instead.");
 }
 
+/// Sets the machine up once, so that a project is protected by containing an
+/// `agent.lock` rather than by anyone running a command in it.
+pub fn install(watch: &[PathBuf], depth: Option<usize>, dry_run: bool) -> Result<ExitCode> {
+    if !service::SUPPORTED {
+        bail!("{}", service::unsupported_reason());
+    }
+
+    let roots = scan_roots(watch)?;
+    let executable = std::env::current_exe().context("could not find the ralon executable")?;
+    let home = registry::home()?;
+
+    if dry_run {
+        println!("state      {}", home.display());
+        println!("supervisor {}", executable.display());
+        for root in &roots {
+            println!("watching   {}", registry::display(root));
+        }
+        println!(
+            "depth      {}",
+            depth.unwrap_or(registry::DEFAULT_MAX_DEPTH)
+        );
+        println!();
+        println!("Nothing was registered.");
+        return Ok(ExitCode::from(OK));
+    }
+
+    let mut supervisor = Supervisor::load()?;
+    supervisor.set_roots(roots.clone(), depth)?;
+
+    // Enforced before the service is registered, and by this process. The
+    // developer who just ran `install` is owed protection for the projects that
+    // already exist, now, with the result on the screen — not whenever a service
+    // they cannot see gets round to its first pass.
+    let started = supervisor.tick(true)?;
+
+    let registration = service::install(&executable, &home)?;
+
+    println!(
+        "wrote      {}",
+        supervisor.registry().config_path().display()
+    );
+    for root in &roots {
+        println!("watching   {}", registry::display(root));
+    }
+    println!("registered {}", registration.mechanism);
+    if let Some(path) = &registration.path {
+        println!("           {}", path.display());
+    }
+    println!(
+        "enforcing  {}",
+        count(
+            started
+                .iter()
+                .filter(|action| matches!(action, supervisor::Action::Begin(_)))
+                .count(),
+            "project",
+            "projects"
+        )
+    );
+    for warning in &registration.warnings {
+        eprintln!("ralon: warning: {warning}");
+    }
+
+    println!();
+    println!("Any project under those directories with an {POLICY_FILE} is now enforced,");
+    println!("including ones cloned later. Nothing to run per project.");
+    println!();
+    println!("  ralon status     what is protected here, and whether it is");
+    println!("  ralon pause      release this project to edit its policy");
+    println!("  ralon uninstall  stop, and hand everything back");
+    println!();
+    print_what_a_refusal_looks_like();
+    if enforce::guard::BACKEND == Backend::Immutable {
+        println!();
+        print_macos_caveat();
+    }
+    Ok(ExitCode::from(OK))
+}
+
+/// Undoes `install`, including everything it is currently holding.
+pub fn uninstall(keep_enforcement: bool) -> Result<ExitCode> {
+    let removed = service::uninstall()?;
+    if removed {
+        println!("deregistered the background supervisor");
+    } else {
+        println!("no background supervisor was registered");
+    }
+
+    if keep_enforcement {
+        println!();
+        println!("Enforcement was left in place. Nothing is watching it now, so a project");
+        println!("stays protected exactly as it is — including after its {POLICY_FILE} is");
+        println!("deleted. `ralon guard --stop` releases one project by hand.");
+        return Ok(ExitCode::from(OK));
+    }
+
+    let mut supervisor = Supervisor::load()?;
+    let released = supervisor.release_all()?;
+    println!(
+        "released   {}",
+        count(released.len(), "project", "projects")
+    );
+    for root in &released {
+        println!("  {}", registry::display(root));
+    }
+    Ok(ExitCode::from(OK))
+}
+
+/// Releases one project so its own policy can be edited.
+pub fn pause(directory: &Path, minutes: u64, indefinitely: bool) -> Result<ExitCode> {
+    let root = supervised_root(directory)?;
+    let until = (!indefinitely).then(|| registry::now() + minutes * 60);
+
+    let mut supervisor = Supervisor::load()?;
+    supervisor.pause(&root, until)?;
+
+    println!("paused     {}", registry::display(&root));
+    match until {
+        Some(_) => println!(
+            "enforcement resumes on its own in {}",
+            count(minutes as usize, "minute", "minutes")
+        ),
+        // Said plainly, because this is the state where a developer believes
+        // they are protected and is not.
+        None => println!("this project is NOT protected until `ralon resume`"),
+    }
+    Ok(ExitCode::from(OK))
+}
+
+pub fn resume(directory: &Path) -> Result<ExitCode> {
+    let root = supervised_root(directory)?;
+    let mut supervisor = Supervisor::load()?;
+    supervisor.resume(&root)?;
+
+    if enforce::guard::running(&root) {
+        println!("enforcing  {}", registry::display(&root));
+        Ok(ExitCode::from(OK))
+    } else {
+        // Never reported as resumed when it is not: this is the whole failure
+        // mode the tool exists to prevent.
+        bail!(
+            "could not resume enforcement for {} — `ralon status` says what is wrong",
+            root.display()
+        )
+    }
+}
+
+/// The supervisor itself.
+pub fn daemon(foreground: bool, once: bool, home: Option<PathBuf>) -> Result<ExitCode> {
+    if let Some(home) = home {
+        registry::set_home(home);
+    }
+    if !service::SUPPORTED {
+        bail!("{}", service::unsupported_reason());
+    }
+
+    let mut supervisor = Supervisor::load()?;
+
+    if once {
+        supervisor.verbose = true;
+        let actions = supervisor.tick(true)?;
+        if actions.is_empty() {
+            println!("ralon: nothing to change");
+        }
+        return Ok(ExitCode::from(OK));
+    }
+
+    // `--foreground` is what launchd and Task Scheduler both want, and is what
+    // happens either way: the alternative would be forking into the background,
+    // which makes the service manager think the job died and restart it forever.
+    let _ = foreground;
+    supervisor::run(&mut supervisor)?;
+    Ok(ExitCode::from(OK))
+}
+
+/// The directories `install` will search, checked before anything is written.
+fn scan_roots(requested: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let requested: Vec<PathBuf> = if requested.is_empty() {
+        // The home directory, because a developer's repositories are somewhere
+        // under it and asking which subdirectory is a question most people
+        // would answer with "all of them".
+        vec![registry::user_home().context(
+            "could not find your home directory — pass --watch with a directory to search",
+        )?]
+    } else {
+        requested.to_vec()
+    };
+
+    let mut roots = Vec::new();
+    for root in requested {
+        let canonical = std::fs::canonicalize(&root)
+            .with_context(|| format!("cannot watch {} — no such directory", root.display()))?;
+        if !canonical.is_dir() {
+            bail!("cannot watch {} — it is not a directory", root.display());
+        }
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
+/// The project root for `pause` and `resume`, canonical so it matches what the
+/// supervisor recorded.
+fn supervised_root(directory: &Path) -> Result<PathBuf> {
+    let policy = Policy::load(directory)?;
+    Ok(std::fs::canonicalize(&policy.root)?)
+}
+
+/// The one thing a macOS user has to know that a Windows user does not.
+fn print_macos_caveat() {
+    println!("On macOS the supervisor enforces with `chflags uchg`, which refuses every");
+    println!("ordinary write from every process — and which an agent can undo by running");
+    println!("`chflags nouchg` itself. It is a narrowing, not a sandbox. `ralon run -- <agent>`");
+    println!("applies a Seatbelt profile the agent cannot drop, and is strictly stronger.");
+}
+
 /// Holds the policy open with no command to supervise.
 pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Result<ExitCode> {
     // Before anything that might print: this process has no console, and Rust
@@ -110,7 +329,7 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
         if stopped {
             println!("guard released — the protected paths are writable again");
         } else {
-            println!("no guard was running for {}", root.display());
+            println!("no guard was running for {}", registry::display(&root));
         }
         for directory in cleared {
             println!("cleared    {}", directory.display());
@@ -120,7 +339,10 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
 
     if detach {
         enforce::guard::detach(&root)?;
-        println!("guard running in the background for {}", root.display());
+        println!(
+            "guard running in the background for {}",
+            registry::display(&root)
+        );
         println!("every process on this machine is now refused those paths");
         println!("stop it with: ralon guard --stop");
         println!();
@@ -128,10 +350,13 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
         return Ok(ExitCode::from(OK));
     }
 
-    // Off Windows there is no backend to resolve and `start` explains why, so
-    // resolution is skipped rather than failing with the wrong message.
+    // A guard's backend is not `run`'s. `Backend::Auto` picks the strongest
+    // thing that can be *inherited*, and a guard has no process to inherit it —
+    // on macOS that is the difference between Seatbelt and `chflags`. Where no
+    // guard is possible, resolution is skipped so `start` gets to explain why
+    // rather than failing with the wrong message.
     let backend = if enforce::guard::AVAILABLE {
-        enforce::resolve(Backend::Auto)?
+        enforce::resolve(enforce::guard::BACKEND)?
     } else {
         Backend::Auto
     };
@@ -225,6 +450,7 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
     if enforce::guard::AVAILABLE {
         report_guard(&policy, &found);
     }
+    report_supervisor(&policy);
 
     // "unavailable" states a fact and leaves the wrong conclusion available:
     // that a policy which lists protected paths is protecting them. It is not.
@@ -446,6 +672,65 @@ fn report_guard(policy: &Policy, found: &[ProtectedPath]) {
         println!("  {}", directory.display());
     }
     println!("  ralon guard --stop    clear it");
+}
+
+/// Whether this project is covered by the machine-wide supervisor, and whether
+/// that supervisor is alive.
+///
+/// Three separate questions, reported separately, because two of them have a
+/// comfortable answer that means nothing on its own. A project inside a watched
+/// directory is *eligible* to be enforced; a registered service is *supposed* to
+/// be running. Only the third — a supervisor process holding its claim right now
+/// — says anything about whether the files are actually protected.
+fn report_supervisor(policy: &Policy) {
+    if !service::SUPPORTED {
+        return;
+    }
+    let Ok(registry) = registry::Registry::load() else {
+        return;
+    };
+    let root = std::fs::canonicalize(&policy.root).unwrap_or_else(|_| policy.root.clone());
+
+    // Reported, then fallen through rather than returned from. A workspace can
+    // be enforced by a supervisor nobody registered — `ralon daemon` run by
+    // hand, or a machine part-way through being set up — and stopping here would
+    // print "not installed" and say nothing at all about whether these files are
+    // protected, which is the question being asked.
+    match (service::installed(), single::running()) {
+        (true, true) => println!("supervisor running"),
+        (true, false) => {
+            println!("supervisor registered, but no process is running — `ralon daemon --once`")
+        }
+        (false, true) => println!("supervisor running, but not registered to start at logon"),
+        (false, false) => println!("supervisor not installed (`ralon install`)"),
+    }
+
+    if !registry.config.covers(&root) {
+        println!(
+            "workspace  outside every watched directory, so the supervisor will not \
+             enforce it\n           (`ralon install --watch {}`)",
+            root.display()
+        );
+        return;
+    }
+
+    match registry.find(&root).map(|entry| &entry.state) {
+        Some(registry::State::Enforced) => println!("workspace  enforced by the supervisor"),
+        Some(registry::State::Paused { until }) => match until {
+            Some(until) => {
+                let remaining = until.saturating_sub(registry::now()).div_ceil(60);
+                println!(
+                    "workspace  PAUSED — not protected. Resumes in {}.",
+                    count(remaining as usize, "minute", "minutes")
+                );
+            }
+            None => println!("workspace  PAUSED indefinitely — not protected (`ralon resume`)"),
+        },
+        Some(registry::State::Failed { reason }) => {
+            println!("workspace  NOT protected — {reason}");
+        }
+        None => println!("workspace  watched, not yet enforced (`ralon daemon --once`)"),
+    }
 }
 
 /// Conditions that weaken the policy without breaking it. Printed before the

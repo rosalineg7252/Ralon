@@ -22,6 +22,75 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Set this machine up once, so any project with an agent.lock is enforced
+    ///
+    /// Registers a background supervisor with the operating system — a logon
+    /// task on Windows, a LaunchAgent on macOS — and tells it which directories
+    /// to look for projects in. After this, a repository is protected because it
+    /// contains an `agent.lock`, with nothing to run per project and nothing to
+    /// wrap the agent in.
+    ///
+    /// Not available on Linux, where a restriction can only be inherited by a
+    /// process at startup and never imposed on one already running. `ralon
+    /// install` explains that rather than registering a service that would watch
+    /// files it cannot protect.
+    Install {
+        /// A directory to look for projects in. Repeatable.
+        /// Defaults to your home directory.
+        #[arg(long = "watch", value_name = "DIR")]
+        watch: Vec<PathBuf>,
+
+        /// How deep below a watched directory a project may be
+        #[arg(long, value_name = "N")]
+        depth: Option<usize>,
+
+        /// Print what would be registered and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Remove the background supervisor and release everything it holds
+    Uninstall {
+        /// Deregister the supervisor but leave the current enforcement in place
+        #[arg(long)]
+        keep_enforcement: bool,
+    },
+
+    /// Release one project so its policy can be edited, then take it back
+    ///
+    /// `agent.lock` protects itself, so a project the supervisor is enforcing
+    /// cannot have its own policy rewritten — including by you. This is how you
+    /// get it back for a while.
+    Pause {
+        /// Minutes before enforcement resumes on its own
+        #[arg(long, value_name = "MINUTES", default_value_t = 15)]
+        minutes: u64,
+
+        /// Stay paused until `ralon resume`. You have to ask for this: a pause
+        /// that is forgotten about is a project that stopped being protected
+        /// without anyone deciding it should.
+        #[arg(long, conflicts_with = "minutes")]
+        indefinitely: bool,
+    },
+
+    /// Resume enforcement for a paused project
+    Resume,
+
+    /// The background supervisor itself. Started by the OS, not by people.
+    Daemon {
+        /// Stay in this process. What launchd and Task Scheduler want.
+        #[arg(long)]
+        foreground: bool,
+
+        /// Do one pass and exit, printing what changed
+        #[arg(long, conflicts_with = "foreground")]
+        once: bool,
+
+        /// Where to keep supervisor state, passed by the registered service
+        #[arg(long, value_name = "DIR")]
+        home: Option<PathBuf>,
+    },
+
     /// Write a starter agent.lock and wire up the agents
     Init {
         /// Overwrite an existing agent.lock

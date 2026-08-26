@@ -25,12 +25,21 @@
 //!
 //! What it does not do is guard: a profile restricts the process it was applied
 //! to and its descendants, so like Linux it cannot cover an agent it did not
-//! start. `ralon guard` says so here rather than pretending.
+//! start.
+//!
+//! That is what the second entry here is for. `immutable` — `chflags uchg` — is
+//! the only mechanism on macOS a background process can impose on an agent
+//! nobody started, so it is what `ralon guard` and the supervisor use. It is
+//! strictly weaker than Seatbelt and `immutable.rs` says exactly how; it is not
+//! offered to `run`, which has something better, and `Backend::Auto` never
+//! selects it.
 //!
 //! The known costs are in `security.md`: `sandbox_init` is deprecated, and rules
 //! name paths, so a hard link or a second path to the same file is outside them
 //! — which `audit.rs` already reports.
 
+pub mod guard;
+mod immutable;
 mod seatbelt;
 
 use std::ffi::OsString;
@@ -61,6 +70,14 @@ pub fn availability() -> Vec<(Backend, Availability)> {
         (Backend::Mount, linux_only("mount namespaces")),
         (Backend::Landlock, linux_only("Landlock")),
         (Backend::Seatbelt, seatbelt),
+        (
+            Backend::Immutable,
+            Availability::Available {
+                detail: "chflags uchg, refused to every process until it is cleared — \
+                         a narrowing an agent can undo with `chflags nouchg`, not a sandbox"
+                    .to_string(),
+            },
+        ),
     ]
 }
 

@@ -4,6 +4,84 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## 0.1.6
+
+`agent.lock` becomes the thing that activates enforcement. Set the machine up
+once with `ralon install`, and from then on a repository is protected because it
+contains a policy file — no `ralon init`, no wrapper around the agent, nothing to
+remember after a reboot, and repositories cloned later are covered by the same
+setup.
+
+Where that is not possible, this release says so instead of approximating it.
+Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
+`ralon run` and is labelled that way everywhere it appears.
+
+### Added
+
+- **`ralon install` / `ralon uninstall`** — registers a per-user background
+  supervisor with the operating system: a Task Scheduler logon task on Windows, a
+  launchd LaunchAgent on macOS. No administrator, no root, and it survives a
+  reboot because the OS starts it. `--watch` names the directories to look for
+  projects in; the default is the home directory.
+- **`ralon pause` / `ralon resume`** — releases one project so its own policy can
+  be edited, since `agent.lock` protects itself. A pause expires after fifteen
+  minutes unless `--indefinitely` is given: a pause that is forgotten about is a
+  project that stopped being protected without anyone deciding it should.
+- **`ralon daemon`** — the supervisor itself, started by the service. `--once`
+  does a single pass and prints what changed.
+- **A macOS guard**, using `chflags uchg`. This **reverses an earlier decision**
+  in this project not to implement it. The objection was to describing a
+  narrowing as protection, and it was right; what changed is that a supervisor
+  needs a mechanism it can *impose* on a process nobody started, and on macOS
+  this is the entire list. So it is implemented and labelled: an agent can undo
+  it with `chflags nouchg`, it does not pin ancestors, and it is not equivalent
+  to process-level sandboxing. `ralon run` remains the guarantee there.
+  `security.md` and `enforce/macos/immutable.rs` state the limits, and
+  `tests/immutable.rs` asserts the weaknesses so the claims cannot drift.
+- `ralon status` now answers "is the supervisor registered", "is it running" and
+  "is *this project* protected" as three separate lines. The first two have a
+  comfortable answer that means nothing about the third.
+- `tests/supervisor.rs` — the full lifecycle against the real binary: a policy
+  appearing and being removed, a malformed one, several repositories at once,
+  twelve concurrent unrelated processes attacking, a supervisor restart, a
+  simulated reboot, and writes attempted through shells and scripts rather than
+  an agent's edit tools.
+
+### Changed
+
+- **`ralon install` fails on Linux**, with the reason and what to use instead.
+  Every Linux mechanism is inherited by a process before it runs and cannot be
+  applied to one already running, so a systemd user unit would start cleanly,
+  report `active (running)`, and enforce nothing. `ralon run` is unchanged and
+  remains stronger than any supervisor on any platform.
+- `ralon guard` now resolves the backend a *guard* can use rather than the one
+  `run` would pick. On macOS that is the difference between Seatbelt, which can
+  only be inherited, and the immutable flag, which can be imposed.
+
+### Fixed
+
+- **A guard was reported as failed when it had actually started.** `guard
+  --detach` waited three seconds for the background process to claim the project;
+  a binary Windows has not scanned before takes about 2.9 seconds to reach its
+  first instruction, which is the first run after every install and every
+  upgrade. The wait is now thirty seconds, and the claim — a kernel object — is
+  re-checked before any failure is recorded.
+- **Two spellings of one directory were two projects.** The guard's claim is a
+  hash of the project path, so a path reached by walking and the same path
+  canonicalized did not refer to the same project. Workspace identity is now
+  canonicalized where the path enters the system.
+- Canonical Windows paths are no longer printed in their verbatim `\\?\` form.
+
+### A note on the tests
+
+The Windows attack helper in `tests/supervisor.rs` passes its command line to
+`cmd.exe` with `raw_arg`. `Command::arg` escapes an embedded quote as `\"`, which
+`cmd` does not parse that way, so a redirect to a quoted path silently never ran —
+the attack did nothing, the file was unchanged, and reading it back looked like a
+refusal. Every enforcement assertion would have passed against a Ralon that
+enforced nothing. Caught because the tests also assert the control case: that the
+same write *succeeds* before the policy is applied.
+
 ## 0.1.5
 
 Enforcement is not the only thing that has to be legible. When Ralon refuses a

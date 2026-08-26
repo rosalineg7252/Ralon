@@ -47,6 +47,11 @@ pub enum Backend {
     /// like `mount`, inherited like `landlock`, and the only backend whose
     /// rules cover files that do not exist yet.
     Seatbelt,
+    /// macOS: `chflags uchg`, the user immutable flag. The only mechanism here
+    /// that can be imposed on a process nobody started, which is what a guard
+    /// needs — and a narrowing rather than a boundary, because the agent can run
+    /// `chflags nouchg` too. Never chosen by `run`, which has Seatbelt.
+    Immutable,
 }
 
 impl fmt::Display for Backend {
@@ -57,6 +62,7 @@ impl fmt::Display for Backend {
             Backend::Landlock => "landlock",
             Backend::Locks => "locks",
             Backend::Seatbelt => "seatbelt",
+            Backend::Immutable => "immutable",
         };
         // pad, not write_str, so `{backend:<9}` lines up in tables
         f.pad(name)
@@ -112,6 +118,11 @@ impl Plan {
             Backend::Mount | Backend::Locks | Backend::Seatbelt => {
                 pinned_directories(root, &protected)
             }
+            // `immutable` deliberately pins nothing. Making an ancestor
+            // immutable is the only way to stop it being renamed, and it would
+            // also stop any new file being created anywhere in the project —
+            // so the gap is left open and named in `security.md` rather than
+            // closed at a price nobody agreed to.
             _ => Vec::new(),
         };
         let profile = (backend == Backend::Seatbelt)
@@ -156,18 +167,22 @@ pub fn availability() -> Vec<(Backend, Availability)> {
     platform::availability()
 }
 
-// Holding a policy open with no command to supervise. Only Windows can: its
-// locks are held by a process and refuse *everyone else*, so one process
-// sitting in the background protects the files against every agent however it
-// was started. The Linux mechanisms are the mirror image — they restrict the
-// process tree they are applied to, which is far stronger for anything started
-// through `run` and worth nothing for anything that was not. The mechanisms
-// that would restrict a process you did not start (`chattr +i`, fanotify
-// permission events) all need privileges Ralon should not be asking for.
-#[cfg(target_os = "windows")]
+// Holding a policy open with no command to supervise, which is what `guard` and
+// the supervisor both need. Two platforms can, for different reasons: Windows
+// holds share-mode locks that refuse *everyone else*, and macOS sets a flag on
+// the inode that outlives every process. Both are imposed rather than inherited,
+// which is the property that lets a background process protect an agent it did
+// not start.
+//
+// Linux is the mirror image. Its mechanisms restrict the process tree they are
+// applied to — far stronger for anything started through `run`, and worth
+// nothing for anything that was not — and the interfaces that would restrict a
+// process you did not start (`chattr +i`, fanotify permission events) all need
+// privileges Ralon should not be asking for.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use platform::guard;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[path = "unguarded.rs"]
 pub mod guard;
 

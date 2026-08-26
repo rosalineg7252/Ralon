@@ -14,17 +14,31 @@ protect:
   - .github/workflows/**
 ```
 
-Then you start the agent through it:
+You set the machine up once:
+
+```console
+$ ralon install
+registered a Task Scheduler logon task
+watching   C:\Users\dev
+```
+
+From then on, a repository is protected **because it contains an `agent.lock`**.
+Clone it, write the file, and the paths it names are refused to every process on
+the machine — no command to run in the project, no wrapper around the agent, and
+nothing to remember after a reboot.
+
+Those paths are read-only *to the kernel*. Not a linter, not a hook the agent can
+talk its way past, not a prompt it can forget. `open()` fails, `rm` fails, and
+the agent gets on with the work it is allowed to do.
+
+On Linux there is no `ralon install`, and the reason is worth knowing rather than
+working around — see [Two ways to enforce](#two-ways-to-enforce). There you start
+the agent through Ralon instead, which is stronger:
 
 ```console
 $ ralon run -- claude
 ralon: 5 paths locked via the mount backend
 ```
-
-Inside that process — and every process it spawns, forever — those paths are
-read-only *to the kernel*. Not a linter, not a hook the agent can talk its way
-past, not a prompt it can forget. `open()` returns `EROFS`, `rm` returns
-`EACCES`, and the agent gets on with the work it is allowed to do.
 
 ```
 .gitignore  → what Git must not track
@@ -51,12 +65,107 @@ The command is `ralon` however you install it. The policy file is called
 `agent.lock`, not `ralon.lock`, on purpose: it is a format, not a product.
 Anything could enforce it — this is one thing that does.
 
-`run` enforces on **Linux** (mount namespaces, Landlock), **macOS** (the
-Seatbelt sandbox) and **Windows** (exclusive file handles). All of them block
-*processes*, so they cover every agent — including ones that have never heard of
-Ralon. `ralon status` says which one you are getting and why.
+Ralon enforces on **Linux** (mount namespaces, Landlock), **macOS** (the Seatbelt
+sandbox, or the immutable flag) and **Windows** (exclusive file handles). All of
+them block *processes*, so they cover every agent — including ones that have
+never heard of Ralon. `ralon status` says which one you are getting and why.
 
-## Use
+## Set the machine up once
+
+**Windows and macOS.**
+
+```console
+$ ralon install                # register the supervisor; watches your home directory
+$ ralon install --watch ~/code --watch ~/work    # or name the directories yourself
+```
+
+That registers a per-user background supervisor with the operating system — a
+Task Scheduler logon task on Windows, a launchd LaunchAgent on macOS — and
+records which directories to look for projects in. No administrator, no root, and
+it comes back after a reboot because the operating system starts it.
+
+After that, the whole workflow is:
+
+```console
+$ git clone git@github.com:you/app.git
+$ cd app && $EDITOR agent.lock     # say what must not change
+                                   # …that is the entire remaining step
+```
+
+The supervisor notices the file — `ReadDirectoryChangesW` on Windows, FSEvents on
+macOS, both kernel notifications rather than polling — and enforcement is in
+place within a second. A repository cloned next month is covered by the same
+setup.
+
+Day to day:
+
+```console
+$ ralon status                 # is this project protected, and by what
+$ ralon pause                  # release this project for 15 minutes to edit its policy
+$ ralon pause --indefinitely   # until you say otherwise
+$ ralon resume                 # take it back now
+$ ralon uninstall              # deregister, and hand every project back
+```
+
+`ralon pause` exists because `agent.lock` protects itself — which is the point of
+it, and does mean you cannot edit your own policy while it is enforced. A pause
+expires on its own by default: a pause that is forgotten about is a project that
+stopped being protected without anyone deciding it should.
+
+### Why `agent.lock` is what activates it
+
+The policy file is the declaration, and deliberately nothing more. It holds
+patterns relative to itself — no PIDs, no sockets, no absolute paths, no daemon
+state — so it is safe to commit and identical on every machine that checks the
+repository out. The supervisor never writes to it.
+
+It also grants nothing by existing. Only directories you named with `ralon
+install` are searched, so an `agent.lock` inside a downloaded archive protects
+nothing and locks nothing: being *found* is a permission the developer gives
+once, to a directory, by name.
+
+## Two ways to enforce
+
+|  | `ralon install` (a supervisor) | `ralon run -- <agent>` |
+| --- | --- | --- |
+| Covers | every process on the machine | the command, and everything it spawns |
+| Applies to agents you did not start | yes | no |
+| Survives a reboot | yes | n/a |
+| Can be killed | yes — it is a process (Windows) | no — it *becomes* the command |
+| Linux | not available | ✅ |
+| macOS | ✅ weaker; see below | ✅ strongest here |
+| Windows | ✅ | ✅ |
+
+The split is a difference in kernels, not a gap in Ralon. Windows enforcement is
+**held** by a process and refused to everyone else; Linux and macOS sandboxes are
+**inherited** by a process before it runs. Inherited is the stronger of the two —
+there is no supervisor to kill — but it cannot be imposed on a process you did
+not start, which is exactly what a supervisor has to do.
+
+So on **Linux there is no supervisor**, and `ralon install` fails and says why
+rather than registering a systemd unit that would come up green and enforce
+nothing:
+
+```console
+$ ralon install
+ralon: automatic background enforcement is not possible on linux.
+       …
+       ralon run -- <your agent>   the agent and every process it spawns
+```
+
+On **macOS the supervisor is real but weaker than `ralon run`**, and this matters
+enough to repeat: it enforces with `chflags uchg`, the user immutable flag. That
+refuses every ordinary write from every process — editors, redirects, `rm`, `mv`,
+`sed -i`, every agent's edit tool — and an agent that goes looking can undo it
+with `chflags nouchg`. It is a narrowing, not a sandbox, and it is not equivalent
+to process-level sandboxing. `ralon run` applies a Seatbelt profile the agent
+cannot drop, see, or ask the kernel to lift. Use `run` for an agent you launch;
+the supervisor is for the ones you do not.
+
+On **Windows the two are the same mechanism** — share-mode handles either way —
+so the supervisor gives up nothing except that it is a process and can be killed.
+
+### Per-command enforcement
 
 ```console
 $ ralon init                   # write a starter agent.lock, and wire up the agents
@@ -67,42 +176,37 @@ $ ralon run --dry-run -- npm test    # what would be locked, without locking it
 $ ralon run -- claude          # the real thing
 ```
 
-`ralon run` replaces itself with your command, so the agent keeps its
-terminal, its exit code, and its signals. There is no supervisor process to kill
-and nothing to keep running in the background.
+`ralon run` replaces itself with your command, so the agent keeps its terminal,
+its exit code, and its signals. There is no supervisor process to kill and
+nothing to keep running in the background.
 
-### On Windows, start here
+`ralon guard --detach` is the same thing a supervisor does, for one project, by
+hand — useful before `ralon install`, or on a machine where you would rather
+nothing ran in the background. `ralon guard --stop` releases it.
 
-```console
-$ ralon init                   # policy + hooks
-$ notepad agent.lock           # say what must not change
-$ ralon guard --detach         # done — every process is refused those paths
-$ ralon guard --stop           # hand the files back when you want to edit them
-```
+Ralon refuses **writes to the paths you declared**, and nothing else. Reading is
+untouched, so your build, tests, dev server, editor and `git` carry on normally;
+everything outside the policy is untouched too. The only person it gets in the way
+of is you, when you want to edit a protected file — which is what `pause` is for.
 
-A guard holds the locks with no command to supervise. Windows refuses those
-locks to *every process*, so an agent started from an IDE, an extension,
-another terminal, or installed next month is refused without knowing Ralon
-exists — no `ralon run`, no configuration, nothing for the agent to opt into.
-`ralon status` says whether one is running.
+There is no way to refuse *only* an LLM agent and no one else. A process carries
+no mark saying what it is, and agents write through `cmd`, `python`, `node` and
+`git` — the same binaries you use. The hook below is the closest thing, and it is
+defeatable for exactly that reason.
 
-It refuses **writes to the paths you declared**, and nothing else. Reading is
-untouched, so your build, tests, dev server, editor and `git` carry on
-normally; everything outside the policy is untouched too. The only person it
-gets in the way of is you, when you want to edit a protected file — which is
-what `--stop` is for.
+### When it is not working
 
-There is no way to refuse *only* an LLM agent and no one else. A process
-carries no mark saying what it is, and agents write through `cmd`, `python`,
-`node` and `git` — the same binaries you use. The hook below is the closest
-thing, and it is defeatable for exactly that reason.
+| Situation | What happens |
+| --- | --- |
+| Ralon is not installed | Nothing is enforced. `agent.lock` is an ordinary file. |
+| The supervisor is stopped or was never started | Projects it had already enforced **stay** enforced on macOS (the flag is on disk) and are **released** on Windows (the locks die with the process). `ralon status` reports both cases separately. |
+| `agent.lock` is malformed | That project is not enforced, and says so: `ralon status` exits 2 and names the line. Nothing is half-applied, and a policy that cannot be read locks nothing rather than locking everything. |
+| The project is outside every watched directory | Not enforced. `ralon status` says so and prints the `--watch` that would fix it. |
+| `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |
 
-This works on Windows and not on Linux, for one reason worth understanding:
-Windows enforcement is **held** by a process and applies to everyone else,
-while Linux enforcement is **inherited** by a process before it runs. Inherited
-is the stronger of the two — there is no supervisor to kill — but it cannot be
-imposed on a process you did not start. On Linux, `ralon run` is the answer,
-and `ralon guard` says so rather than pretending.
+`ralon status` answers "is the supervisor registered", "is it running" and "is
+*this project* protected" as three separate lines, because the first two have a
+comfortable answer that means nothing about the third.
 
 ### The hook
 
@@ -197,10 +301,19 @@ command starts, so `umount` and bind-mount tricks fail from inside.
 
 ### Where it stops
 
-- **Only what you launch** — unless a guard is running. A policy protects the
-  processes started through `ralon run`; on Windows, `ralon guard` covers the
-  rest of the machine as well, and on Linux an agent started some other way is
-  not restricted.
+- **Only what you launch** — unless a supervisor or a guard is running. Under
+  `ralon run` the policy protects the processes it starts; `ralon install` covers
+  the rest of the machine on Windows and macOS; on Linux an agent started some
+  other way is not restricted.
+- **A supervisor is a process, on Windows.** Killing it releases the locks. `run`
+  has nothing to kill, which is why it is the stronger of the two where both
+  exist. On macOS the opposite: the flag survives everything, including Ralon
+  being killed, which is why a killed supervisor leaves state behind rather than
+  losing protection.
+- **The macOS supervisor does not pin ancestors.** A protected file stays
+  immutable if its parent directory is renamed, but the path the policy named no
+  longer refers to it. Making an ancestor immutable would stop the project ever
+  having a new file written anywhere in it. `ralon run` does not have this gap.
 - **Only what exists.** A protected path that is not on disk yet cannot be
   bind-mounted. `status` and `run` warn about patterns matching nothing. (Under
   the landlock backend such paths cannot be created at all, which is stricter.)
@@ -241,6 +354,16 @@ handling. `run --dry-run --backend seatbelt` prints the profile. `sandbox_init`
 is deprecated and used anyway, for the reason given in `security.md`: it is what
 every sandbox on macOS uses, and the supported alternative needs a signed
 `.app`.
+
+**immutable** (macOS) — `chflags uchg` on each protected path. The only mechanism
+on macOS that can be *imposed* on a process nobody started, which is what makes
+`ralon install` and `ralon guard` possible there; `run` never selects it and
+`--backend auto` never returns it. A directory's flag refuses new entries, and
+each file inside a protected directory is flagged in its own right. It is a
+narrowing an agent can undo with one unprivileged command, it does not pin
+ancestors, and `security.md` states both. Implementing it reversed an earlier
+decision in this project not to — the reasoning, and why it changed, is in
+`enforce/macos/immutable.rs`.
 
 **mount** (default) — read-only bind mounts inside a user + mount namespace,
 locked by entering a second namespace so they cannot be undone. Every parent
@@ -289,6 +412,8 @@ Otherwise `run` exits with your command's own status.
 ```console
 $ cargo test                    # policy, matching and CLI behaviour, any platform
 $ cargo test --test enforcement # real bypass attempts, Linux only
+$ cargo test --test supervisor  # install → agent.lock → enforced, Windows and macOS
+$ cargo test --test immutable   # what chflags uchg does and does not do, macOS only
 ```
 
 The enforcement tests need a kernel that provides at least one backend. In a

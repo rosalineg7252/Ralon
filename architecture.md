@@ -48,15 +48,54 @@ is a process that deliberately stays alive. See `DESIGN.md` §3.)
 | `enforce/carve.rs` | Landlock rule planning (pure, filesystem injected) |
 | `enforce/profile.rs` | Seatbelt profile text (pure, tested everywhere) |
 | `enforce/linux/` | `mount.rs`, `landlock.rs`, `sys.rs` |
-| `enforce/macos/` | `seatbelt.rs` — `sandbox_init`, and nothing else |
+| `enforce/macos/` | `seatbelt.rs`, `immutable.rs`, `guard.rs` |
 | `enforce/windows/` | `locks.rs`, `acl.rs`, `job.rs`, `guard.rs` |
 | `enforce/unguarded.rs` | why a guard cannot work on this platform |
+| `supervisor/mod.rs` | `reconcile` (pure), and the daemon loop around it |
+| `supervisor/registry.rs` | scan roots, remembered workspaces, the sweep |
+| `supervisor/single.rs` | one supervisor per user, claimed with a handle |
+| `supervisor/watch/` | `windows.rs`, `macos.rs`, `sweep.rs` |
+| `service/` | `windows.rs` (Task Scheduler), `macos.rs` (launchd), `unsupported.rs` |
 
 The platform directories hold all the `unsafe` code and are the only files that
 do not compile everywhere. Everything else builds and is tested on all three
 platforms, which is what keeps `check`, `status` and `hook install` usable in
 mixed teams and in CI — and what lets `--dry-run` show the same plan on a
 machine that cannot enforce it.
+
+## The supervisor
+
+`ralon install` → a repository with an `agent.lock` is enforced, with nothing run
+inside it. Three pieces, and the split between them is the design:
+
+1. **Discovery** — a kernel watcher (`ReadDirectoryChangesW`, FSEvents) over the
+   scan roots, with a full sweep behind it on a 60-second timer and at start-up.
+   The watcher is the mechanism and the sweep is the correctness boundary: a
+   watcher reports *changes*, so it has nothing to say about the state that
+   already existed when it started — after a reboot, that is every workspace on
+   the machine. A watcher that fails to start degrades to the sweep and says so.
+2. **Decision** — `reconcile(known, on_disk, live, now, retry_failed)`, pure and
+   tested on every platform including the ones with no supervisor. Three inputs,
+   not two: what was recorded, what has a policy file, and what is *actually*
+   enforced according to the kernel. The third is what makes a reboot recoverable
+   — on Windows the record says `enforced` after a restart and nothing is.
+3. **Action** — `enforce::guard::{detach, stop, running, clear_leftovers}`. The
+   supervisor contains no platform code and no enforcement of its own; it starts
+   the same guard a person would. Idempotence comes free from the guard's claim
+   being a kernel object rather than a file.
+
+The asymmetry between platforms lands entirely in `enforce/*/guard.rs`. Windows
+spawns a detached guard process per workspace, so one crash does not unprotect
+the others and a surviving guard is adopted rather than duplicated. macOS applies
+`chflags uchg` directly, because the state is on the inode and there is nothing
+to hold. Linux has no `guard`, so `ralon install` refuses — `service/unsupported.rs`
+explains at length why a systemd unit would be worse than nothing.
+
+Workspace identity is the **canonical** path. This is load-bearing: the Windows
+guard's claim is a hash of the project path, so two spellings of one directory
+are two projects that cannot see each other, and the supervisor would decide a
+guard was not running while it was. It is canonicalized once, where the path
+enters the system, and un-prefixed only for display.
 
 ## Policy semantics
 

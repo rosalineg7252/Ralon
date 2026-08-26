@@ -183,6 +183,50 @@ The attack tables in `tests/enforcement.rs` run against this backend on a real
 macOS kernel in CI, with `RALON_REQUIRE_BACKEND=1` so that "nothing was tested"
 fails the job.
 
+### The immutable backend, and what it is not
+
+`ralon guard` and the supervisor cannot use Seatbelt. A profile restricts the
+process it is applied to and its descendants, and both of those exist to protect
+processes nobody started. They use `chflags uchg` — the user immutable flag —
+instead, and this section is the whole basis on which that should be trusted.
+
+**Ralon previously declined to implement this**, on the grounds that it is a
+narrowing of the same kind as the Windows deny ACE and should not be presented as
+protection. That decision is reversed. What changed is that `ralon install` needs
+something a background process can impose, and on macOS this is the entire list:
+Seatbelt is inherited and cannot be imposed, and Endpoint Security needs an
+Apple-granted entitlement, root, and Full Disk Access — a privileged process an
+agent could talk to, which is worse than the problem. So it is implemented, and
+described as what it is.
+
+What it refuses, for every process on the machine, tested in `tests/immutable.rs`:
+overwrite, truncate, append, `rm`, `mv` away, `mv` over, `cat >`, `sed -i`, and
+creating a new entry inside a protected directory. Every ordinary write.
+
+What it does **not** do, each with a test that asserts the weakness so the claim
+here cannot drift:
+
+- **An agent can undo it.** `chflags nouchg` needs no privileges and is one
+  command. This is a narrowing, not a sandbox, and **it is not equivalent to
+  process-level sandboxing**. `run` is: a Seatbelt profile cannot be dropped,
+  inspected, or lifted by the process it applies to.
+- **Ancestors are not pinned.** Renaming a parent directory succeeds. The file
+  stays immutable — its contents are still protected — but the path `agent.lock`
+  named no longer refers to it. Closing this would mean making ancestors
+  immutable, which stops the project accepting a new file anywhere, so the gap is
+  left open and named instead. `run` pins ancestors and does not have it.
+- **It leaves state behind.** A supervisor that is killed cannot clear the flags,
+  so they stay set. That fails *closed* — the files remain protected — and is the
+  opposite failure mode from Windows, where a killed guard loses protection.
+  `ralon status` reports it and `ralon guard --stop` clears it.
+- **A path that cannot be flagged is reported, never skipped in silence** —
+  another user's file, a read-only filesystem, a filesystem with no flags. The
+  rest of the policy is still applied.
+
+The honest summary: on macOS, `ralon run` is the guarantee and the supervisor is
+a narrowing that covers the agents `run` cannot reach. Both are worth having;
+they are not the same thing and this document will not call them the same thing.
+
 ## Windows
 
 `run` enforces on Windows through exclusive share-mode handles: Ralon holds
@@ -252,13 +296,61 @@ child to put in a job, so killing a guard leaves the agent running with the
 files writable; `status` says whether one is running, which is the only
 notice there can be.
 
+## The supervisor
+
+`ralon install` registers a per-user background process that starts enforcement
+for any project containing an `agent.lock`, under directories the developer named
+once. It introduces **no new way to stop a write**: it starts the same guard the
+developer would have started by hand, so nothing about it is easier to bypass
+than `ralon guard` is. What has to be examined is the discovery, not the
+enforcement.
+
+- **`agent.lock` grants nothing by existing.** Only paths inside a registered
+  scan root are considered, so a policy file arriving inside a downloaded archive
+  or a dependency's source tree is inert. Being found is a permission the
+  developer gives to a directory, by name, once. The check is applied to what the
+  filesystem watcher reports as well as to the sweep, so a notification cannot
+  introduce a workspace the configuration does not allow.
+- **The policy is data, not configuration of Ralon.** It names patterns relative
+  to itself and cannot select a backend, a command, a privilege level, or a path
+  outside its own project — `..`, absolute paths, `~` and `!` are rejected by the
+  same parser the CLI uses. There is nothing in the format for a hostile
+  `agent.lock` to escalate with.
+- **Nothing runs as root or administrator.** The Windows registration is a Task
+  Scheduler logon task with `LeastPrivilege` and an interactive token; the macOS
+  one is a LaunchAgent under the user's own `~/Library`. A tool that protects you
+  from an agent should not be the reason a privileged process exists for an agent
+  to talk to.
+- **A malformed policy enforces nothing and says so.** It is not partially
+  applied and does not fall back to a previous policy. Failing *closed* here
+  would mean freezing a repository on the strength of a file nobody could read;
+  the project is left alone, `status` exits 2 and names the line, and the
+  supervisor records the failure rather than retrying it in silence. The case
+  that would matter most cannot arise: an enforced workspace has its own
+  `agent.lock` locked, so nothing can corrupt it while enforcement is in place.
+- **The record is not evidence.** The supervisor asks the kernel whether each
+  workspace is actually enforced rather than trusting `workspaces.json`. This is
+  load-bearing on Windows: enforcement lives in a process, so a reboot ends all of
+  it while the file still says `enforced`, and a supervisor that believed its own
+  notes would come up, agree with itself, and protect nothing. The same check
+  restores a guard that was killed.
+- **State is per-user and outside the repository.** `agent.lock` is never written
+  to. Everything the supervisor learns lives in its own state directory.
+
+Its limits are the limits of the thing it starts. On Windows a supervisor is a
+process and killing it releases the locks — `run` has nothing to kill, which is
+why it remains the stronger option for an agent you launch yourself. On macOS see
+*The immutable backend, and what it is not*, above.
+
 ## Where there is no enforcement at all
 
-Every platform Ralon ships for now has a backend for `run`. What none of Linux
-or macOS has is a *guard*: their restrictions are inherited by a process before
+Every platform Ralon ships for now has a backend for `run`. Linux has no *guard*
+and therefore no supervisor: its restrictions are inherited by a process before
 it starts, never imposed on one already running, so an agent launched any other
 way is unrestricted there — which is the situation most people are actually in
-until they start the agent through `ralon run`.
+until they start the agent through `ralon run`. `ralon install` fails on Linux
+with that explanation rather than registering a systemd user unit, which would
+start cleanly, report `active (running)`, and enforce nothing.
 
 `ralon hook install` writes a refusal into the agent's own configuration. Be
 precise about what that buys:

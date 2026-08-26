@@ -33,6 +33,11 @@ use crate::enforce::Plan;
 /// Whether this platform can protect a process it did not start.
 pub const AVAILABLE: bool = true;
 
+/// What a guard here enforces with. The same backend `run` uses: on Windows the
+/// mechanism was never inherited in the first place, so there is nothing weaker
+/// about holding it from a background process instead of a wrapper.
+pub const BACKEND: crate::enforce::Backend = crate::enforce::Backend::Locks;
+
 const INFINITE: u32 = 0xFFFF_FFFF;
 const EVENT_MODIFY_STATE: u32 = 0x0002;
 const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -296,7 +301,15 @@ pub fn detach(root: &Path) -> Result<()> {
         CloseHandle(information.process);
     }
 
-    for _ in 0..60 {
+    // Thirty seconds, which looks absurd for a process that claims the project
+    // in about a hundred milliseconds — until the binary is one Windows has not
+    // scanned before. Measured on a freshly built `ralon.exe`: 2.9 seconds to
+    // first instruction, against a previous limit of three, because Defender
+    // reads the whole image before letting it start. That is not an edge case,
+    // it is the first run after every install and every upgrade — precisely when
+    // `ralon install` calls this. Waiting longer costs nothing; giving up early
+    // reports a failure for a guard that is about to work.
+    for _ in 0..600 {
         if running(root) {
             return Ok(());
         }

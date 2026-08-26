@@ -1,23 +1,26 @@
 //! Platforms where a policy cannot be held open on its own.
 //!
-//! Not an omission — the shape of the mechanism. Unix enforcement here is a
-//! restriction applied to a process *before* it runs: a Landlock domain, a
-//! locked mount namespace and a Seatbelt profile are all inherited, never
+//! Linux, in practice. Not an omission — the shape of the mechanism.
+//!
+//! Enforcement here is a restriction applied to a process *before* it runs: a
+//! Landlock domain and a locked mount namespace are both inherited, never
 //! imposed, so there is no way for a process to reach out and restrict another
 //! one it did not start. The interfaces that could — `chattr +i`, fanotify
-//! permission events, macOS's Endpoint Security, an LSM of one's own — all want
-//! privileges a developer tool has no business holding, and asking for root to
-//! protect a file from an agent gives the agent a root process to talk to.
+//! permission events, an LSM of one's own — all want privileges a developer tool
+//! has no business holding, and asking for root to protect a file from an agent
+//! gives the agent a root process to talk to.
 //!
-//! macOS has one thing Linux does not: `chflags uchg`, which marks a file
-//! immutable and is undone by `chflags nouchg` — one command, available to the
-//! agent, no privileges needed. That is a narrowing of the same kind as the
-//! Windows deny ACE, not a guard, and it is not implemented rather than being
-//! implemented and described as protection.
+//! macOS used to be routed here too, on the grounds that `chflags uchg` is a
+//! narrowing rather than a guard and should not be described as protection. It
+//! is now implemented, in `enforce/macos/immutable.rs`, described as the
+//! narrowing it is — because a supervisor needs *something* that can be imposed,
+//! and on macOS that is the whole list. Linux has no equivalent: the immutable
+//! bit exists but setting it needs `CAP_LINUX_IMMUTABLE`, which is root.
 //!
-//! So on these platforms `run` is not an inconvenience on the way to something
-//! better; it *is* the something better. A guard would be a background process
-//! that could be killed. `run` becomes the command, and cannot.
+//! So here `run` is not an inconvenience on the way to something better; it *is*
+//! the something better. A guard would be a background process that could be
+//! killed. `run` becomes the command, and cannot. `ralon install` says this in
+//! as many words rather than registering a daemon with nothing to do.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,10 @@ use anyhow::Result;
 use super::Plan;
 
 pub const AVAILABLE: bool = false;
+
+/// Never used — nothing here can start a guard — but it keeps the callers one
+/// body of code rather than one per platform.
+pub const BACKEND: super::Backend = super::Backend::Auto;
 
 pub struct Session {
     /// Never populated — `start` never returns one. It exists so the caller is
