@@ -301,6 +301,106 @@ fn renaming_an_unprotected_ancestor_moves_the_path_out_from_under_the_policy() {
 }
 
 #[test]
+fn substituting_a_file_at_the_protected_path_is_the_limit_of_this_backend() {
+    // The consequence of the test above, stated as an attack rather than as a
+    // property, because "the path no longer refers to it" is a mild way of
+    // saying something that is not mild: the policy declares that
+    // `src/deep/secret.txt` must not change, and after this it has.
+    //
+    // This asserts a **weakness**, deliberately, the same way
+    // `an_agent_can_undo_it_which_is_why_this_is_not_a_sandbox` does. macOS
+    // gives one flag that means both "may not be renamed" and "may not accept
+    // new entries", so pinning `src/` would stop the project ever gaining a
+    // file in `src/`, and pinning the project root — which every policy needs,
+    // because `agent.lock` lives there — would stop it gaining a file at all.
+    // Every other backend pins its ancestors without that cost and closes this;
+    // `tests/enforcement.rs` and `tests/supervisor.rs` hold them to it.
+    //
+    // If this test ever fails, the backend became stronger and `security.md`,
+    // the README and `audit.rs` are all overstating the gap — which is still a
+    // bug, and this is where it surfaces.
+    let project = Project::new();
+    fs::create_dir_all(project.path("src/deep")).unwrap();
+    fs::write(project.path("src/deep/secret.txt"), "ORIGINAL").unwrap();
+    fs::write(
+        project.path("agent.lock"),
+        "version: 1\nprotect:\n  - src/deep/secret.txt\n",
+    )
+    .unwrap();
+    project.ralon(&["guard", "--detach"]);
+
+    project
+        .attack("mv src/deep src/moved && mkdir -p src/deep && echo PWNED > src/deep/secret.txt");
+
+    assert_eq!(
+        project.contents("src/deep/secret.txt").trim(),
+        "PWNED",
+        "the ancestor substitution was refused — the backend is stronger than \
+         documented, and security.md now understates it"
+    );
+    // The original bytes are still immutable. That is the part that holds, and
+    // it is not the part anything reads.
+    assert_eq!(project.contents("src/moved/secret.txt"), "ORIGINAL");
+}
+
+#[test]
+fn protecting_the_directory_closes_the_substitution() {
+    // The mitigation `audit.rs` prints, checked rather than asserted in prose.
+    // A protected *directory* carries the flag itself, so it cannot be renamed,
+    // and the attack above has nowhere to start.
+    let project = Project::new();
+    fs::create_dir_all(project.path("src/deep")).unwrap();
+    fs::write(project.path("src/deep/secret.txt"), "ORIGINAL").unwrap();
+    fs::write(
+        project.path("agent.lock"),
+        "version: 1\nprotect:\n  - src/deep\n",
+    )
+    .unwrap();
+    project.ralon(&["guard", "--detach"]);
+
+    project
+        .attack("mv src/deep src/moved && mkdir -p src/deep && echo PWNED > src/deep/secret.txt");
+
+    assert_eq!(
+        project.contents("src/deep/secret.txt"),
+        "ORIGINAL",
+        "protecting the directory did not stop the substitution, so the advice \
+         in audit.rs is wrong"
+    );
+}
+
+#[test]
+fn a_policy_with_an_exposed_ancestor_says_so_before_the_agent_starts() {
+    let project = Project::new();
+    fs::create_dir_all(project.path("src/deep")).unwrap();
+    fs::write(project.path("src/deep/secret.txt"), "ORIGINAL").unwrap();
+    fs::write(
+        project.path("agent.lock"),
+        "version: 1\nprotect:\n  - src/deep/secret.txt\n",
+    )
+    .unwrap();
+
+    let started = project.ralon(&["guard", "--detach"]);
+    let said = String::from_utf8_lossy(&started.stderr);
+    assert!(
+        said.contains("src/deep/secret.txt") && said.contains("`src/deep` is not"),
+        "the exposure was not reported: {said}"
+    );
+    assert!(
+        said.contains("Protect `src/deep` instead"),
+        "the warning did not say how to close it: {said}"
+    );
+
+    // And a policy without the exposure stays quiet, or the warning is noise.
+    let clean = Project::new();
+    let quiet = clean.ralon(&["guard", "--detach"]);
+    assert!(
+        !String::from_utf8_lossy(&quiet.stderr).contains("instead of the file inside it"),
+        "warned about a policy that has no exposed ancestor"
+    );
+}
+
+#[test]
 fn a_path_that_cannot_be_flagged_is_reported_and_never_silently_skipped() {
     let project = Project::new();
     // A policy naming a path that is not on disk. Nothing can be flagged for it,

@@ -157,6 +157,48 @@ Linux gets a refusal with a reason; macOS gets a mechanism that is weaker than
   canonicalized where the path enters the system.
 - Canonical Windows paths are no longer printed in their verbatim `\\?\` form.
 
+### The ancestor-path question, answered
+
+Asked directly: with `src/deep/secret.txt` protected and neither `src/` nor
+`src/deep/` protected, can an agent manipulate an ancestor so the file ends up
+somewhere else and something writable takes its place? Every backend was run
+against the whole family — rename an ancestor, rename a grandparent, move it out
+of the tree, delete and rebuild it, swap it for a decoy, symlink or junction over
+it, rename the protected file itself, hard-link out and edit.
+
+- **Linux (mount and Landlock), Windows (locks), macOS (Seatbelt): held**, all
+  of them. Each pins the directories on the way to a protected path — as mount
+  points, as held directory handles, as `literal` deny nodes — so the first
+  `mv` fails and nothing that follows gets started. Five substitution attacks
+  were added to `tests/enforcement.rs` and a Windows set to
+  `tests/supervisor.rs`, all asserting on **the content at the protected path**
+  rather than on the rename, so a regression in pinning cannot pass by refusing
+  the rename alone.
+- **macOS `immutable` — the guard and the supervisor — is exposed**, and it is a
+  real substitution, not a cosmetic one: rename the ancestor, recreate it, and
+  the declared path holds someone else's file while the original bytes sit
+  immutable under a name nothing reads.
+
+It is not fixed, and the reason is a property of the mechanism rather than a
+decision to leave it: macOS has one flag meaning both "may not be renamed" and
+"may not accept new entries". Pinning `src/` would stop the project gaining a
+file in `src/`; pinning the project root — which every policy needs, since
+`agent.lock` lives there — would stop it gaining a file anywhere. The other
+backends can separate those two ideas and this one cannot.
+
+What was added instead:
+
+- **`audit.rs` reports the exposure before the guard starts**, naming the file,
+  the unprotected ancestor, and the way to close it — protect the directory
+  rather than the file inside it, since a protected directory carries the flag
+  itself and cannot be renamed. `ralon status` repeats it, because the output of
+  the command that started enforcement scrolled away days ago.
+- **Three tests in `tests/immutable.rs` pin the boundary**: that the substitution
+  succeeds today, that protecting the directory stops it, and that the warning
+  fires only when the exposure is real. The first asserts a weakness on purpose —
+  if it ever fails, the backend got stronger and this changelog, `security.md`
+  and the README are all overstating the gap, which is still a bug.
+
 ### A note on the macOS tests
 
 `tests/immutable.rs` had never run when it was written — there is no container

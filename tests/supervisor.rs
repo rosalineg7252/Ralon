@@ -848,6 +848,52 @@ mod with_a_supervisor {
         assert!(listed.contains("unreachable"), "{listed}");
     }
 
+    /// Renaming a directory on the way to a protected file, and putting a
+    /// different file back at that path.
+    ///
+    /// The bytes surviving under a new name is no comfort: what matters is what
+    /// is at the path the policy named, because that is what every build and
+    /// deploy reads. Windows pins each ancestor with a directory handle that
+    /// shares neither write nor delete, so the rename fails before any of this
+    /// gets started — but the assertion is on the *content at the protected
+    /// path*, so a regression in pinning fails here rather than passing on the
+    /// strength of the rename alone.
+    #[test]
+    #[cfg(windows)]
+    fn an_ancestor_cannot_be_renamed_and_substituted() {
+        let machine = Machine::new();
+        let repository = machine.repository_in(
+            &machine.code.clone(),
+            "nested",
+            Some("version: 1\nprotect:\n  - src/deep/secret.txt\n"),
+        );
+        fs::create_dir_all(repository.path("src/deep")).unwrap();
+        fs::write(repository.path("src/deep/secret.txt"), "ORIGINAL").unwrap();
+        machine.tick();
+
+        for attack in [
+            // rename an ancestor, then rebuild it and write a different file
+            "ren src\\deep moved && mkdir src\\deep && echo PWNED> src\\deep\\secret.txt",
+            // the same one level up
+            "ren src src2 && mkdir src\\deep && echo PWNED> src\\deep\\secret.txt",
+            // build the replacement first and swap it in
+            "mkdir decoy && echo PWNED> decoy\\secret.txt && move /y src\\deep old && move /y decoy src\\deep",
+            // remove the ancestor outright and rebuild it
+            "rmdir /s /q src\\deep && mkdir src\\deep && echo PWNED> src\\deep\\secret.txt",
+            // a junction pointing somewhere the policy never named
+            "mkdir evil && echo PWNED> evil\\secret.txt && rmdir /s /q src\\deep && mklink /J src\\deep evil",
+            // move the ancestor out of the project entirely
+            "move /y src\\deep ..\\stolen",
+        ] {
+            shell(&repository.root, attack);
+            assert_eq!(
+                repository.contents("src/deep/secret.txt"),
+                "ORIGINAL",
+                "`{attack}` put different content at the protected path"
+            );
+        }
+    }
+
     #[test]
     fn a_protected_directory_refuses_new_entries() {
         let machine = Machine::new();

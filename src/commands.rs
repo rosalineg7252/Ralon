@@ -575,6 +575,7 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
         // way to learn that one of the paths was never among them.
         warn_about_unmatched(&policy, &found);
         warn_about_weaknesses(&policy, &found);
+        warn_about_exposed_ancestors(&found);
 
         println!();
         print_what_a_refusal_looks_like();
@@ -605,6 +606,7 @@ pub fn guard(directory: &Path, detach: bool, stop: bool, detached: bool) -> Resu
     }
     warn_about_unmatched(&policy, &found);
     warn_about_weaknesses(&policy, &found);
+    warn_about_exposed_ancestors(&found);
     eprintln!("ralon: guarding — Ctrl-C, or `ralon guard --stop`, to release");
 
     session.park()?;
@@ -712,6 +714,10 @@ pub fn status(directory: &Path) -> Result<ExitCode> {
 
     warn_about_unmatched(&policy, &found);
     warn_about_weaknesses(&policy, &found);
+    // `status` is where someone checks whether they are actually covered, so the
+    // one exposure the backend cannot close belongs here too — not only in the
+    // output of the command that started it, which scrolled away days ago.
+    warn_about_exposed_ancestors(&found);
     Ok(ExitCode::from(OK))
 }
 
@@ -968,6 +974,22 @@ fn report_supervisor(policy: &Policy) {
             println!("workspace  NOT protected — {reason}");
         }
         None => println!("workspace  in scope, not yet enforced (`ralon daemon --once`)"),
+    }
+}
+
+/// The ancestor exposure, on the one backend that has it.
+///
+/// Gated on the backend rather than on the platform: `ralon run` on macOS uses
+/// Seatbelt, which denies its ancestors as `literal` nodes and does not have
+/// this gap, so warning there would be telling people about a hole they are not
+/// standing in. Only a guard — and the supervisor, which is a guard someone else
+/// started — enforces with `immutable`.
+fn warn_about_exposed_ancestors(found: &[ProtectedPath]) {
+    if enforce::guard::BACKEND != Backend::Immutable {
+        return;
+    }
+    for finding in audit::exposed_ancestors(found) {
+        eprintln!("ralon: warning: {} {}", finding.subject, finding.detail);
     }
 }
 

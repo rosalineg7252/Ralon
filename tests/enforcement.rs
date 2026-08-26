@@ -179,6 +179,36 @@ const ATTACKS: &[(&str, &str)] = &[
         "chmod 777 src/index.tsx; echo hacked > src/index.tsx",
     ),
     ("rename the parent", "mv src src-moved"),
+    // The ancestor family. Moving a directory on the way to a protected file is
+    // only half an attack; the half that matters is what goes back in its place.
+    // The file's bytes surviving under a new name is no comfort at all if the
+    // path the policy named now holds someone else's content — that is what
+    // every build, test run and deploy will read.
+    //
+    // Every backend here pins its ancestors, so all of these fail at the first
+    // `mv`. They are written out in full anyway: the assertion is on the content
+    // at the protected path, so if pinning ever regresses these fail rather than
+    // the table quietly still passing on the rename alone.
+    (
+        "rename the parent, then substitute",
+        "mv src src-moved; mkdir -p src; echo hacked > src/index.tsx",
+    ),
+    (
+        "rename the grandparent, then substitute",
+        "mkdir -p a/b && mv src a/b/ 2>/dev/null; mkdir -p src; echo hacked > src/index.tsx",
+    ),
+    (
+        "swap the parent for a decoy",
+        "mkdir -p decoy && echo hacked > decoy/index.tsx && mv src old && mv decoy src",
+    ),
+    (
+        "symlink the parent at a decoy",
+        "mkdir -p evil && echo hacked > evil/index.tsx && rm -rf src && ln -s evil src",
+    ),
+    (
+        "delete the parent, then rebuild it",
+        "rm -rf src; mkdir -p src; echo hacked > src/index.tsx",
+    ),
 ];
 
 #[test]

@@ -24,6 +24,67 @@ pub fn audit(root: &Path, protected: &[ProtectedPath]) -> Vec<Finding> {
     findings
 }
 
+/// Protected files reachable through a directory the policy does not protect.
+///
+/// Every backend but one closes this by pinning the directories on the way to a
+/// protected path — a mount point, a held handle, a `literal` deny node — so
+/// none of them can be renamed. The `immutable` backend cannot: macOS conflates
+/// "this directory may not be renamed" and "this directory may not accept new
+/// entries" into one flag, so pinning `src/` would stop the project ever getting
+/// a new file in `src/`, and pinning the project root — which every policy needs,
+/// since `agent.lock` lives there — would stop it getting a new file at all.
+///
+/// What that leaves open is not merely cosmetic, and the wording here says so:
+/// rename `src/deep` out of the way, recreate it, and write whatever you like at
+/// `src/deep/secret.txt`. The original bytes stay immutable under their new path
+/// and are no longer the ones anything reads.
+///
+/// The fix available to a *developer* is real and worth printing: protect the
+/// directory rather than the file inside it. A protected directory carries the
+/// flag itself and cannot be renamed, which closes the substitution at that
+/// level.
+///
+/// Pure and platform-independent so the rule is tested everywhere; the caller
+/// decides whether the running backend makes it relevant.
+pub fn exposed_ancestors(protected: &[ProtectedPath]) -> Vec<Finding> {
+    let directories: Vec<&str> = protected
+        .iter()
+        .filter(|path| path.is_dir)
+        .map(|path| path.relative.as_str())
+        .collect();
+
+    protected
+        .iter()
+        .filter(|path| !path.is_dir)
+        .filter_map(|path| {
+            // Only files nested inside a directory can have one renamed out from
+            // under them. A root-level `.env` has no ancestor but the project
+            // root, which is a different exposure and not this one.
+            let parent = path.relative.rsplit_once('/')?.0;
+
+            // Covered when any directory on the way is itself protected: that
+            // one is flagged, so it cannot be renamed, and nothing above it can
+            // move the file without moving the protected directory too.
+            let covered = directories
+                .iter()
+                .any(|guarded| parent == *guarded || parent.starts_with(&format!("{guarded}/")));
+            if covered {
+                return None;
+            }
+
+            Some(Finding {
+                subject: path.relative.clone(),
+                detail: format!(
+                    "is protected, but `{parent}` is not — and this backend cannot pin a \
+                     directory without freezing it. Renaming `{parent}` and recreating it \
+                     puts a different file at that path. Protect `{parent}` instead of the \
+                     file inside it to close that"
+                ),
+            })
+        })
+        .collect()
+}
+
 /// A protected file that something else already has open for writing.
 ///
 /// Not a weakness in the policy — the opposite. It is a file that is *in use*:
@@ -234,6 +295,65 @@ mod tests {
 25 0 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
 26 25 8:1 /home/dev/proj /mnt/copy rw,relatime shared:1 - ext4 /dev/sda1 rw
 27 25 0:22 / /proc rw,relatime shared:2 - proc proc rw";
+
+    fn found(relative: &str, is_dir: bool) -> ProtectedPath {
+        ProtectedPath {
+            relative: relative.to_string(),
+            absolute: std::path::PathBuf::from("/p").join(relative),
+            is_dir,
+            pattern: relative.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_nested_file_with_no_protected_ancestor_is_reported() {
+        let findings = exposed_ancestors(&[found("src/deep/secret.txt", false)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "src/deep/secret.txt");
+        // The way out has to be in the message; a warning nobody can act on is
+        // noise that teaches people to ignore warnings.
+        assert!(
+            findings[0].detail.contains("Protect `src/deep` instead"),
+            "{}",
+            findings[0].detail
+        );
+    }
+
+    #[test]
+    fn a_file_inside_a_protected_directory_is_not_reported() {
+        // `src/deep` carries the flag itself, so it cannot be renamed and the
+        // substitution has nowhere to happen.
+        let findings =
+            exposed_ancestors(&[found("src/deep", true), found("src/deep/secret.txt", false)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_file_deep_inside_a_protected_directory_is_not_reported() {
+        let findings =
+            exposed_ancestors(&[found("config", true), found("config/a/b/db.yaml", false)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_root_level_file_is_not_reported() {
+        // `.env` and `agent.lock` sit in the project root. Renaming *that* is a
+        // different exposure — it moves the policy too — and reporting it for
+        // every policy ever written would be noise.
+        let findings = exposed_ancestors(&[found(".env", false), found("agent.lock", false)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_sibling_directory_with_a_shared_prefix_does_not_count_as_cover() {
+        // `src/deepish` is protected; `src/deep` is not. Matching on the string
+        // prefix alone would call this covered and say nothing.
+        let findings = exposed_ancestors(&[
+            found("src/deepish", true),
+            found("src/deep/secret.txt", false),
+        ]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
 
     #[test]
     fn finds_a_bind_mount_of_the_project() {

@@ -210,16 +210,41 @@ here cannot drift:
   command. This is a narrowing, not a sandbox, and **it is not equivalent to
   process-level sandboxing**. `run` is: a Seatbelt profile cannot be dropped,
   inspected, or lifted by the process it applies to.
-- **Unprotected ancestors are not pinned.** Renaming a directory *above* a
-  protected file succeeds. The file stays immutable — its contents are still
-  protected — but the path `agent.lock` named no longer refers to it. Closing
-  this would mean making every ancestor immutable, which stops the project
-  accepting a new file anywhere, so the gap is left open and named instead.
-  `run` pins ancestors and does not have it.
+- **Unprotected ancestors are not pinned, and that permits substitution.** This
+  is the sharpest limitation of this backend, so it is stated as the attack it
+  is. Given a policy protecting `src/deep/secret.txt` where neither `src/` nor
+  `src/deep/` is protected:
 
-  A protected *directory* is not affected: it carries the flag itself and cannot
-  be renamed or removed. Both halves are asserted in `tests/immutable.rs`, one of
-  them because the macOS CI job caught this document overstating the gap.
+  ```console
+  $ mv src/deep src/moved        # allowed: src/ is not flagged
+  $ mkdir -p src/deep
+  $ echo whatever > src/deep/secret.txt
+  ```
+
+  The original bytes remain immutable under their new name. They are also no
+  longer the bytes anything reads: every build, test run and deploy that opens
+  the declared path now gets the attacker's file. "The path no longer refers to
+  it" is the mild way of saying the policy has been defeated.
+
+  **Why it is not fixed.** macOS gives one flag meaning both *this directory may
+  not be renamed* and *this directory may not accept new entries*. Pinning `src/`
+  would stop the project ever gaining a file in `src/`; pinning the project root
+  — which every policy needs, because `agent.lock` lives there — would stop it
+  gaining a file at all. Every other backend separates the two: a mount point, a
+  held directory handle, and a Seatbelt `literal` node each forbid the rename
+  while leaving creation alone. This one cannot, so the gap is named rather than
+  closed at a price nobody agreed to.
+
+  **What closes it.** Protect the *directory* instead of the file inside it. A
+  protected directory carries the flag itself and cannot be renamed, so the
+  substitution has nowhere to start. `audit.rs` detects the exposed case and
+  prints exactly that advice before the guard starts, and `ralon status` repeats
+  it.
+
+  Every clause above has a test in `tests/immutable.rs`: that the substitution
+  succeeds, that protecting the directory stops it, and that the warning fires
+  only when the exposure is real. The corresponding attacks are held on every
+  other backend by `tests/enforcement.rs` and `tests/supervisor.rs`.
 - **It leaves state behind.** A supervisor that is killed cannot clear the flags,
   so they stay set. That fails *closed* — the files remain protected — and is the
   opposite failure mode from Windows, where a killed guard loses protection.
