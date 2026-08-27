@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ralon hook check",
+            "statusMessage": "Checking agent.lock",
+            "type": "command"
+          }
+        ],
+        "matcher": "[Ww]rite|[Ee]dit|[Cc]reate|[Rr]eplace|[Pp]atch|[Ii]nsert|[Uu]pdate|[Dd]elete|[Rr]emove|[Rr]ename|[Mm]ove"
+      }
+    ]
+  }
+}

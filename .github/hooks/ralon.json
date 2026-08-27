@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "command": "ralon hook check",
+        "timeout": 15,
+        "type": "command"
+      }
+    ]
+  }
+}
