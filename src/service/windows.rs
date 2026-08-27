@@ -5,17 +5,47 @@
 //! the default `ExecutionTimeLimit` of `PT72H`, so Windows would terminate the
 //! supervisor after three days and every protected workspace would quietly
 //! become writable. There is no command-line switch to change it. `/XML` is the
-//! only way to say `PT0S`, and while the file is being written anyway it is also
-//! the only way to say `Hidden` — without which every logon opens a console
-//! window that sits there for the rest of the session.
+//! only way to say `PT0S`.
 //!
 //! Per-user and unelevated: the task runs as the user who installed it, with
-//! `LeastPrivilege` and an interactive token. Nothing here needs administrator,
-//! and a Ralon that asked for it would be handing an agent something better to
-//! attack than the files it is guarding.
+//! `LeastPrivilege`. Nothing here needs administrator, and a Ralon that asked
+//! for it would be handing an agent something better to attack than the files
+//! it is guarding.
+//!
+//! # The console window
+//!
+//! `ralon` is a console program, and a console program started by something
+//! without a console of its own gets a fresh one — visible, in the middle of the
+//! screen. Task Scheduler is such a thing, so registering the supervisor used to
+//! mean a black window at `ralon install` and another at every logon after it.
+//!
+//! `<Hidden>` does not fix this and this file used to claim it did. `Hidden`
+//! controls whether the task is listed in the Task Scheduler UI; it has nothing
+//! to say about windows the task's process opens. Neither does `CREATE_NO_WINDOW`
+//! — that is a creation flag, and Task Scheduler does not offer one.
+//!
+//! `<LogonType>S4U</LogonType>` does fix it, by running the task in session 0,
+//! where there is no desktop for a console to appear on. It needs no password
+//! and no administrator. The cost is that a session-0 process has no network
+//! credentials, so a scope on a mapped drive or a UNC path is unreachable from
+//! it — [`super::network_scope_warning`] is why that is said out loud rather
+//! than discovered.
+//!
+//! Enforcement itself is unaffected, and that is worth stating because it is the
+//! part that would matter if it were wrong: the Windows backend works by holding
+//! file handles, and a handle is a kernel object with no session in it. Verified
+//! rather than assumed — a supervisor in session 0 was watched starting a guard
+//! for a new `agent.lock`, and writes, deletes and renames from an interactive
+//! session were all refused with the file's contents unchanged afterwards.
+//!
+//! Not every machine allows S4U: it needs the batch logon right, which a locked
+//! down domain policy can withhold. Registration therefore tries S4U and falls
+//! back to `InteractiveToken`, which always works and shows the window — with a
+//! warning saying so, because a silently reappearing window would send the next
+//! person back to this same investigation.
 
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -47,21 +77,23 @@ fn schtasks(arguments: &[&str]) -> Command {
 
 pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
     let user = account();
-    let xml = describe_task(executable, home, &user);
+    let mut warnings = Vec::new();
 
-    // A file rather than a pipe: `schtasks /XML` takes a path, and it wants
-    // UTF-16 — handed UTF-8 it reports a parse error that names a line number
-    // and nothing useful about the encoding.
-    let path = std::env::temp_dir().join("ralon-supervisor-task.xml");
-    std::fs::write(&path, utf16(&xml))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-
-    let created = schtasks(&["/Create", "/TN", TASK, "/XML"])
-        .arg(&path)
-        .arg("/F")
-        .output()
-        .context("failed to run schtasks — is it on PATH?")?;
-    let _ = std::fs::remove_file(&path);
+    // S4U first, because it is the one that does not open a console window.
+    // Falling back rather than failing: a machine whose policy withholds the
+    // batch logon right should still get a supervisor, and be told what it cost.
+    let mut created = register(executable, home, &user, LogonType::S4U)?;
+    if !created.status.success() {
+        let reason = message(&created);
+        created = register(executable, home, &user, LogonType::Interactive)?;
+        if created.status.success() {
+            warnings.push(format!(
+                "this machine would not accept a background (S4U) task ({reason}), so the \
+                 supervisor runs interactively and a console window will appear at each \
+                 logon. Enforcement is unaffected"
+            ));
+        }
+    }
 
     if !created.status.success() {
         anyhow::bail!(
@@ -70,10 +102,17 @@ pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
         );
     }
 
+    // Any old instance is already gone: `commands::install` calls
+    // [`stop`] and then waits for the claim to be released, because it has to
+    // replace the binary that instance was running from. Worth stating because
+    // `MultipleInstancesPolicy` is `IgnoreNew` — `/Run` against a task that is
+    // still running does nothing whatsoever and reports success, which is how a
+    // re-install used to leave the *previous* binary supervising until the next
+    // logon while `ralon --version` reported the new one.
+
     // Registered is not running: the trigger is the *next* logon, and a
     // developer who just ran `ralon install` is owed enforcement now rather
     // than after a reboot.
-    let mut warnings = Vec::new();
     let started = schtasks(&["/Run", "/TN", TASK])
         .output()
         .context("failed to run schtasks")?;
@@ -90,6 +129,30 @@ pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
         path: None,
         warnings,
     })
+}
+
+/// Ends the running instance without deregistering it.
+///
+/// Called before `install` replaces the staged binary. A running supervisor
+/// holds that file exclusively (see `supervisor::selfguard`), which is the whole
+/// point of it — but it means an upgrade has to ask the old one to let go first,
+/// rather than discovering it cannot write the file and giving up.
+pub fn stop() {
+    let _ = schtasks(&["/End", "/TN", TASK]).output();
+}
+
+/// Starts the registered task, if there is one.
+pub fn start() -> Result<()> {
+    if !installed() {
+        return Ok(());
+    }
+    let started = schtasks(&["/Run", "/TN", TASK])
+        .output()
+        .context("failed to run schtasks")?;
+    if !started.status.success() {
+        anyhow::bail!("{}", message(&started));
+    }
+    Ok(())
 }
 
 pub fn uninstall() -> Result<bool> {
@@ -122,6 +185,26 @@ pub fn installed() -> bool {
         .unwrap_or(false)
 }
 
+/// The executable the registration currently points at.
+///
+/// `status` uses this to catch a registration whose binary has been deleted —
+/// the state a machine ends up in when Ralon was installed from a package
+/// manager and then removed with that package manager. Task Scheduler keeps the
+/// entry, tries it at every logon, fails, and reports nothing anybody reads.
+pub fn registered_path() -> Option<PathBuf> {
+    let output = schtasks(&["/Query", "/TN", TASK, "/XML", "ONE"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    // `schtasks /XML` writes UTF-16LE. Decoding it properly matters for a path
+    // with a non-ASCII character in it, which is most paths under a home
+    // directory named for a person.
+    let xml = decode(&output.stdout);
+    let start = xml.find("<Command>")? + "<Command>".len();
+    let end = xml[start..].find("</Command>")? + start;
+    Some(PathBuf::from(unescape(xml[start..end].trim())))
+}
+
 pub fn unsupported_reason() -> String {
     String::new()
 }
@@ -142,10 +225,57 @@ fn account() -> String {
     }
 }
 
-fn describe_task(executable: &Path, home: &Path, user: &str) -> String {
+/// How the task's process gets its token, which decides whether it has a
+/// desktop to open a window on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LogonType {
+    /// Session 0. No console window is possible, and no network credentials.
+    S4U,
+    /// The user's own session. Always available, always shows the window.
+    Interactive,
+}
+
+impl LogonType {
+    fn xml(self) -> &'static str {
+        match self {
+            LogonType::S4U => "S4U",
+            LogonType::Interactive => "InteractiveToken",
+        }
+    }
+}
+
+/// Writes the XML and hands it to `schtasks`, returning its result rather than
+/// interpreting it — the caller decides whether a failure is fatal or a reason
+/// to try the other logon type.
+fn register(
+    executable: &Path,
+    home: &Path,
+    user: &str,
+    logon: LogonType,
+) -> Result<std::process::Output> {
+    let xml = describe_task(executable, home, user, logon);
+
+    // A file rather than a pipe: `schtasks /XML` takes a path, and it wants
+    // UTF-16 — handed UTF-8 it reports a parse error that names a line number
+    // and nothing useful about the encoding.
+    let path = std::env::temp_dir().join("ralon-supervisor-task.xml");
+    std::fs::write(&path, utf16(&xml))
+        .with_context(|| format!("failed to write {}", path.display()))?;
+
+    let created = schtasks(&["/Create", "/TN", TASK, "/XML"])
+        .arg(&path)
+        .arg("/F")
+        .output()
+        .context("failed to run schtasks — is it on PATH?")?;
+    let _ = std::fs::remove_file(&path);
+    Ok(created)
+}
+
+fn describe_task(executable: &Path, home: &Path, user: &str, logon: LogonType) -> String {
     let command = escape(&executable.display().to_string());
     let arguments = escape(&format!("daemon --home \"{}\"", home.display()));
     let user = escape(user);
+    let logon = logon.xml();
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -163,7 +293,7 @@ fn describe_task(executable: &Path, home: &Path, user: &str) -> String {
   <Principals>
     <Principal id="Author">
       <UserId>{user}</UserId>
-      <LogonType>InteractiveToken</LogonType>
+      <LogonType>{logon}</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -211,6 +341,46 @@ fn escape(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// The inverse of [`escape`], for reading a path back out of the registration.
+fn unescape(text: &str) -> String {
+    // `&amp;` last: doing it first would turn `&amp;lt;` into `<`.
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Whatever `schtasks` decided to write this time.
+///
+/// It is not consistent, and the document is not a reliable witness about
+/// itself. `schtasks /Query /XML` emits a declaration that says
+/// `encoding="UTF-16"` and then writes single-byte characters to a redirected
+/// pipe; `schtasks /Create /XML` refuses to read anything *but* UTF-16. So the
+/// bytes are what decides here, and the declaration is ignored.
+///
+/// Found by reading a real registration rather than a fixture: decoding as
+/// UTF-16 unconditionally turned every path into interleaved rubbish, `status`
+/// found no `<Command>` element, and a registration pointing at a deleted binary
+/// went on being reported as healthy — which is the one thing this parser
+/// exists to catch.
+fn decode(bytes: &[u8]) -> String {
+    let utf16 = match bytes {
+        [0xFF, 0xFE, ..] => true,
+        // No mark, so look for the shape instead: UTF-16LE ASCII puts a zero
+        // byte after every character, and UTF-8 XML never starts `<\0`.
+        [_, 0, ..] => true,
+        _ => false,
+    };
+    if !utf16 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let bytes = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
+    let (pairs, _odd) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
+    String::from_utf16_lossy(&units)
+}
+
 /// UTF-16LE with a byte order mark, which is what `schtasks /XML` reads.
 fn utf16(text: &str) -> Vec<u8> {
     let mut bytes = vec![0xFF, 0xFE];
@@ -239,13 +409,18 @@ fn message(output: &std::process::Output) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_task_never_expires() {
-        let xml = describe_task(
+    fn task(logon: LogonType) -> String {
+        describe_task(
             Path::new("C:\\ralon.exe"),
             Path::new("C:\\state"),
             "PC\\dev",
-        );
+            logon,
+        )
+    }
+
+    #[test]
+    fn the_task_never_expires() {
+        let xml = task(LogonType::S4U);
         // The whole reason this file exists rather than a `schtasks /Create`
         // one-liner: the default is PT72H, and a supervisor that stops after
         // three days unprotects every workspace without saying anything.
@@ -253,17 +428,45 @@ mod tests {
             xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"),
             "{xml}"
         );
-        assert!(xml.contains("<Hidden>true</Hidden>"), "{xml}");
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"), "{xml}");
     }
 
     #[test]
-    fn the_state_directory_is_passed_rather_than_inherited() {
-        let xml = describe_task(
-            Path::new("C:\\ralon.exe"),
-            Path::new("C:\\state"),
-            "PC\\dev",
+    fn the_preferred_registration_runs_where_no_console_can_appear() {
+        // The fix for a console window at every logon, and the reason it works:
+        // S4U puts the process in session 0, which has no desktop. `Hidden` was
+        // what this file used to rely on and it only affects the Task Scheduler
+        // listing.
+        assert!(task(LogonType::S4U).contains("<LogonType>S4U</LogonType>"));
+    }
+
+    #[test]
+    fn the_fallback_is_the_one_that_always_registers() {
+        let xml = task(LogonType::Interactive);
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"), "{xml}");
+    }
+
+    #[test]
+    fn the_task_runs_on_battery() {
+        // A laptop on battery queues a task whose settings are left at their
+        // defaults — it never starts, `schtasks /Query` says `Queued`, and the
+        // result code is 0, so nothing anywhere reports a problem. Found by
+        // registering a probe task without these two lines and watching it sit
+        // there.
+        let xml = task(LogonType::S4U);
+        assert!(
+            xml.contains("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>"),
+            "{xml}"
         );
+        assert!(
+            xml.contains("<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn the_state_directory_is_passed_rather_than_inherited() {
+        let xml = task(LogonType::S4U);
         assert!(xml.contains("daemon --home &quot;C:\\state&quot;"), "{xml}");
     }
 
@@ -273,8 +476,44 @@ mod tests {
             Path::new("C:\\a&b\\ralon.exe"),
             Path::new("C:\\state"),
             "PC\\dev",
+            LogonType::S4U,
         );
         assert!(xml.contains("C:\\a&amp;b\\ralon.exe"), "{xml}");
+    }
+
+    #[test]
+    fn a_registered_path_survives_the_round_trip() {
+        // `registered_path` reads back what `describe_task` wrote, so the
+        // escaping has to be reversible — otherwise `status` reports a path
+        // that does not exist and calls a working install broken.
+        let original = "C:\\a&b\\o'brien\\ralon.exe";
+        let xml = describe_task(
+            Path::new(original),
+            Path::new("C:\\state"),
+            "PC\\dev",
+            LogonType::S4U,
+        );
+        let start = xml.find("<Command>").unwrap() + "<Command>".len();
+        let end = xml[start..].find("</Command>").unwrap() + start;
+        assert_eq!(unescape(&xml[start..end]), original);
+    }
+
+    #[test]
+    fn a_registration_is_read_back_whichever_encoding_it_arrives_in() {
+        // Both are real. `/Create /XML` will read nothing but the first;
+        // `/Query /XML` writes the second to a pipe while its own declaration
+        // claims to be the first. Trusting the declaration meant `status` could
+        // never see a dangling registration, on the machine where one existed.
+        let element = "<Command>C:\\ralon.exe</Command>";
+        assert!(decode(&utf16(element)).contains("C:\\ralon.exe"));
+        assert!(decode(element.as_bytes()).contains("C:\\ralon.exe"));
+    }
+
+    #[test]
+    fn utf16_without_a_byte_order_mark_is_still_utf16() {
+        let mut encoded = utf16("<Command>C:\\ralon.exe</Command>");
+        encoded.drain(..2);
+        assert!(decode(&encoded).contains("C:\\ralon.exe"));
     }
 
     #[test]

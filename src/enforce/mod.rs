@@ -182,6 +182,12 @@ pub fn availability() -> Vec<(Backend, Availability)> {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub use platform::guard;
 
+/// The `chflags` narrowing, re-exported because the supervisor applies it to
+/// its *own* binary as well as to projects — see `supervisor::selfguard`. Same
+/// mechanism, same limitation: `chflags nouchg` undoes it.
+#[cfg(target_os = "macos")]
+pub use platform::immutable;
+
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[path = "unguarded.rs"]
 pub mod guard;

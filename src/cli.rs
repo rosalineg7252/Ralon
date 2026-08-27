@@ -44,6 +44,17 @@ pub enum Command {
         #[arg(long = "scope", value_name = "DIR")]
         scope: Vec<PathBuf>,
 
+        /// Cover only this project, not a directory of them
+        ///
+        /// For a single repository you want protected across reboots without
+        /// declaring where all your code lives. The scope becomes this project
+        /// and nothing else — no other directory on the machine is looked at.
+        /// The supervisor it registers is the same one `--scope` registers;
+        /// there is only ever one per user, and adding a scope later widens it
+        /// rather than replacing it.
+        #[arg(long, conflicts_with = "scope")]
+        here: bool,
+
         /// How deep inside a scope a project may be
         #[arg(long, value_name = "N")]
         depth: Option<usize>,

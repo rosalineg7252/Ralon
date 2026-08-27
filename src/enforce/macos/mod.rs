@@ -39,7 +39,7 @@
 //! — which `audit.rs` already reports.
 
 pub mod guard;
-mod immutable;
+pub mod immutable;
 mod seatbelt;
 
 use std::ffi::OsString;

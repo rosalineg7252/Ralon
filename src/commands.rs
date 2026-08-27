@@ -14,7 +14,7 @@ use crate::matcher::{relative_path, Matcher};
 use crate::policy::{self, Policy, POLICY_FILE};
 use crate::scan::{self, ProtectedPath};
 use crate::service;
-use crate::supervisor::{self, registry, single, Supervisor};
+use crate::supervisor::{self, registry, selfguard, single, Supervisor};
 
 pub const OK: u8 = 0;
 /// A path the policy protects, or a command the policy stopped.
@@ -92,6 +92,8 @@ fn print_what_a_refusal_looks_like() {
 /// `agent.lock` rather than by anyone running a command in it.
 pub fn install(
     scope: &[PathBuf],
+    here: bool,
+    directory: &Path,
     depth: Option<usize>,
     no_hooks: bool,
     dry_run: bool,
@@ -108,7 +110,13 @@ pub fn install(
     // time. Someone whose only scope is D:\Projects has said where their code
     // is; handing them C:\Users\... back on every re-install would be arguing
     // with them.
-    let requested = if scope.is_empty() && supervisor.registry().config.roots.is_empty() {
+    let requested = if here {
+        // The project, not the directory the command was typed in. Running
+        // `ralon install --here` from `src/` should cover the repository, which
+        // is where `agent.lock` lives — scoping to `src/` would silently exclude
+        // the policy file itself and protect nothing.
+        vec![Policy::find_root(directory).unwrap_or_else(|| directory.to_path_buf())]
+    } else if scope.is_empty() && supervisor.registry().config.roots.is_empty() {
         vec![registry::user_home().context(
             "could not find your home directory — pass --scope with a directory instead",
         )?]
@@ -119,7 +127,8 @@ pub fn install(
 
     if dry_run {
         println!("state      {}", home.display());
-        println!("supervisor {}", executable.display());
+        println!("supervisor {}", service::stage::path(&home).display());
+        println!("           copied from {}", executable.display());
         for root in &roots {
             println!("scope      {}", registry::display(root));
         }
@@ -133,11 +142,27 @@ pub fn install(
         return Ok(ExitCode::from(OK));
     }
 
+    // First, and before anything is written. A running supervisor holds both
+    // `config.yaml` and the staged binary — deliberately, so that neither can be
+    // changed behind its back — which means a re-install has to ask it to stand
+    // down rather than discover it cannot write its own configuration. Getting
+    // this order wrong failed with `Access is denied` on the config file, from
+    // Ralon, about a file Ralon owns.
+    //
+    // Guards it started are separate processes and keep holding their projects
+    // for the whole of this, so nothing becomes writable while it runs.
+    service::stop();
+    wait_for_the_supervisor_to_stop();
+    selfguard::release(&home);
+
     // Additive. Re-running `install` must never drop a scope: someone who has
     // added D:\Projects and then runs `ralon install` again to repair a service
     // registration would otherwise silently lose it and find out weeks later,
     // from an agent that edited something it should not have.
+    let before = supervisor.registry().config.roots.clone();
     supervisor.add_scopes(&roots, depth, !no_hooks)?;
+    let after = supervisor.registry().config.roots.clone();
+    selfguard::log_scope_change(&home, &before, &after);
 
     // Enforced before the service is registered, and by this process. The
     // developer who just ran `install` is owed protection for the projects that
@@ -145,14 +170,22 @@ pub fn install(
     // they cannot see gets round to its first pass.
     let started = supervisor.tick(true)?;
 
-    let registration = service::install(&executable, &home)?;
+    // Registered from a copy, never from where the binary happens to live. See
+    // `service::stage` — this is what keeps a running supervisor from making its
+    // own package impossible to uninstall.
+    let staged = service::stage::install(&executable, &home)?;
+    let registration = service::install(&staged, &home)?;
 
     println!(
         "wrote      {}",
         supervisor.registry().config_path().display()
     );
+    println!("supervisor {}", staged.display());
     for root in &supervisor.registry().config.roots {
         println!("scope      {}", registry::display(root));
+        if let Some(warning) = service::network_scope_warning(root) {
+            eprintln!("ralon: warning: {warning}");
+        }
     }
     println!("registered {}", registration.mechanism);
     if let Some(path) = &registration.path {
@@ -175,15 +208,38 @@ pub fn install(
     }
 
     println!();
-    println!("Install once → declare policy → enforcement starts automatically.");
-    println!();
-    println!("There is no third step. Write an {POLICY_FILE} in any project under those");
-    println!("directories and it is enforced within a second, including projects cloned");
-    println!("later. Delete the file and enforcement stops.");
+    if here {
+        // A different promise from the one below, and the difference is the
+        // whole point of the flag: nothing outside this project is looked at,
+        // and saying "any project under those directories" here would be a
+        // description of a machine-wide install the person just declined.
+        println!("This project is protected, and will be again after a reboot.");
+        println!();
+        println!("Nothing else on this machine is watched. Its {POLICY_FILE} is what decides");
+        println!("what is protected — edit the file and the change applies within a second,");
+        println!("delete it and enforcement stops.");
+        println!();
+        println!("  ralon scope add <DIR>   also cover a directory of projects");
+    } else {
+        println!("Install once → declare policy → enforcement starts automatically.");
+        println!();
+        println!("There is no third step. Write an {POLICY_FILE} in any project under those");
+        println!("directories and it is enforced within a second, including projects cloned");
+        println!("later. Delete the file and enforcement stops.");
+        println!();
+        println!("  ralon install --here    cover a single project instead");
+    }
     println!();
     println!("  ralon status     what is protected here, and whether it is");
     println!("  ralon pause      release this project to edit its policy");
     println!("  ralon uninstall  stop, and hand everything back");
+    println!();
+    // Said here because the alternative is finding out from a package manager.
+    // Removing the package does not stop a supervisor that is already running,
+    // and a running supervisor is not something `npm uninstall` reports on.
+    println!("Run `ralon uninstall` before removing the ralon package itself — the");
+    println!("supervisor outlives the package manager that installed it, and nothing");
+    println!("else will stop it.");
     println!();
     if no_hooks {
         print_what_a_refusal_looks_like();
@@ -197,7 +253,12 @@ pub fn install(
         println!();
         print_macos_caveat();
     }
-    report_uncovered_drives(&supervisor.registry().config);
+    // Not after `--here`. That listing exists to catch someone who meant to
+    // cover their code and missed a drive; someone who asked for one project
+    // has said what they meant, and being told about `E:` would be an argument.
+    if !here {
+        report_uncovered_drives(&supervisor.registry().config);
+    }
     Ok(ExitCode::from(OK))
 }
 
@@ -250,6 +311,7 @@ fn report_uncovered_drives(config: &registry::Config) {
 /// Starts honouring `agent.lock` under a directory.
 pub fn scope_add(directories: &[PathBuf]) -> Result<ExitCode> {
     let mut supervisor = Supervisor::load()?;
+    let before = supervisor.registry().config.roots.clone();
 
     for directory in canonical_directories(directories)? {
         match supervisor.add_scope(directory.clone()) {
@@ -268,7 +330,14 @@ pub fn scope_add(directories: &[PathBuf]) -> Result<ExitCode> {
             }
         }
     }
-    supervisor.save_config()?;
+    let after = supervisor.registry().config.roots.clone();
+    with_the_supervisor_stopped(|| supervisor.save_config())?;
+    selfguard::log_scope_change(&registry::home()?, &before, &after);
+    for directory in directories {
+        if let Some(warning) = service::network_scope_warning(directory) {
+            eprintln!("ralon: warning: {warning}");
+        }
+    }
 
     // Reconciled here rather than left to the supervisor's next pass, so that
     // when this command returns the projects under the new scope really are
@@ -292,6 +361,7 @@ pub fn scope_add(directories: &[PathBuf]) -> Result<ExitCode> {
 /// Stops honouring `agent.lock` under a directory, releasing what it held.
 pub fn scope_remove(directories: &[PathBuf]) -> Result<ExitCode> {
     let mut supervisor = Supervisor::load()?;
+    let before = supervisor.registry().config.roots.clone();
     let mut removed = false;
 
     for directory in directories {
@@ -318,7 +388,9 @@ pub fn scope_remove(directories: &[PathBuf]) -> Result<ExitCode> {
             }
         }
     }
-    supervisor.save_config()?;
+    let after = supervisor.registry().config.roots.clone();
+    with_the_supervisor_stopped(|| supervisor.save_config())?;
+    selfguard::log_scope_change(&registry::home()?, &before, &after);
 
     if removed {
         // The projects under a dropped scope are no longer discoverable, so
@@ -371,6 +443,61 @@ pub fn scope_list() -> Result<ExitCode> {
     Ok(ExitCode::from(OK))
 }
 
+/// Runs `change` with no supervisor holding the state directory, then starts one
+/// again if there was one.
+///
+/// A running supervisor holds `config.yaml` against writers — that is what stops
+/// a scope being deleted by editing the file, which would unprotect every
+/// project under it with nothing to notice. The cost is that Ralon's own commands
+/// have to ask it to stand down first. The guards it started are separate
+/// processes and keep holding their projects throughout, so nothing is
+/// unprotected while this runs.
+///
+/// If there was no supervisor, this is just `change`.
+fn with_the_supervisor_stopped<T>(change: impl FnOnce() -> Result<T>) -> Result<T> {
+    if !single::running() {
+        return change();
+    }
+
+    service::stop();
+    wait_for_the_supervisor_to_stop();
+    let result = change();
+
+    // Started again whatever happened to `change`. Returning an error with the
+    // supervisor left down would turn a failed `scope add` into an unprotected
+    // machine, which is a far worse outcome than the thing that failed.
+    if let Err(error) = service::start() {
+        eprintln!(
+            "ralon: warning: the scopes were updated but the supervisor did not restart \
+             ({error:#}). `ralon install` puts it back; until then nothing is picking up \
+             new projects."
+        );
+    }
+    result
+}
+
+/// Waits for a stopped supervisor to actually be gone.
+///
+/// Asking Task Scheduler to end a task returns as soon as it has asked. The
+/// process is still exiting, still holding `supervisor.lock` and still holding
+/// the staged binary — so an `install` that carried straight on either failed to
+/// replace the binary or registered a new supervisor that exited immediately
+/// with "another Ralon supervisor is already running". The second is the one
+/// that happened: the task reported `Last Result: 2` and nothing was supervising
+/// anything until the next logon.
+///
+/// Bounded, and silent when it expires. The lock is the fact; if it is still
+/// held after this, the steps that follow will say so themselves in terms of
+/// what actually failed.
+fn wait_for_the_supervisor_to_stop() {
+    for _ in 0..100 {
+        if !single::running() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// A scope on a whole drive is legal and rarely meant.
 fn warn_about_a_whole_drive(directory: &Path) {
     if directory.parent().is_some() {
@@ -387,6 +514,7 @@ fn warn_about_a_whole_drive(directory: &Path) {
 
 /// Undoes `install`, including everything it is currently holding.
 pub fn uninstall(keep_enforcement: bool) -> Result<ExitCode> {
+    let home = registry::home()?;
     let removed = service::uninstall()?;
     if removed {
         println!("deregistered the background supervisor");
@@ -399,6 +527,10 @@ pub fn uninstall(keep_enforcement: bool) -> Result<ExitCode> {
         println!("Enforcement was left in place. Nothing is watching it now, so a project");
         println!("stays protected exactly as it is — including after its {POLICY_FILE} is");
         println!("deleted. `ralon guard --stop` releases one project by hand.");
+        println!();
+        println!("The supervisor's copy of the binary was kept too, because a guard it");
+        println!("started is still running. `ralon uninstall` without --keep-enforcement");
+        println!("removes both.");
         return Ok(ExitCode::from(OK));
     }
 
@@ -411,6 +543,31 @@ pub fn uninstall(keep_enforcement: bool) -> Result<ExitCode> {
     for root in &released {
         println!("  {}", registry::display(root));
     }
+
+    // Last, and only once nothing is running from it. Reported rather than
+    // ignored: this file is the reason `npm uninstall` and `pip uninstall` used
+    // to fail on Windows, so leaving it behind quietly would recreate exactly
+    // the problem staging it was meant to solve.
+    // macOS leaves a `uchg` flag on the staged binary that outlives the process;
+    // without clearing it first, removing the file below fails.
+    selfguard::release(&home);
+
+    match service::stage::remove(&home) {
+        Ok(true) => println!("removed    {}", service::stage::path(&home).display()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("ralon: warning: {error:#}");
+            eprintln!(
+                "ralon: warning: the supervisor is deregistered and will not come back at \
+                 logon, but something is still running from that file. It exits on its own; \
+                 nothing needs to be killed."
+            );
+        }
+    }
+
+    println!();
+    println!("Ralon is no longer running anything in the background, and the ralon");
+    println!("package can now be removed with whatever installed it.");
     Ok(ExitCode::from(OK))
 }
 
@@ -940,6 +1097,27 @@ fn report_supervisor(policy: &Policy) {
         }
         (false, true) => println!("supervisor running, but not registered to start at logon"),
         (false, false) => println!("supervisor not installed (`ralon install`)"),
+    }
+
+    // A registration pointing at a deleted binary looks identical to a working
+    // one from the outside — it is listed, it is enabled, and it fails at every
+    // logon without telling anybody. Named here because the sequence that
+    // creates it (install from a package manager, then remove the package) is
+    // ordinary, and because "registered, but no process is running" on its own
+    // sends people to look for the wrong thing.
+    if let Some(missing) = service::dangling() {
+        println!("supervisor CANNOT START — it is registered to run a file that is gone:");
+        println!("             {}", missing.display());
+        println!("           `ralon install` re-points it, `ralon uninstall` removes it.");
+    }
+
+    // Only worth a line when it is *not* protected, and only while a supervisor
+    // is running — otherwise this would be saying "your scopes are editable" to
+    // someone who has not installed anything, which is true and useless.
+    if single::running() && !selfguard::scopes_are_held(registry.home()) {
+        println!("scopes     writable by anything on this machine");
+        println!("           {}", registry.config_path().display());
+        println!("           Removing a scope unprotects every project under it.");
     }
 
     println!("log        {}", registry.log_path().display());

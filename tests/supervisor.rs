@@ -1237,3 +1237,214 @@ mod with_a_supervisor {
         assert!(said.contains("enforced by the supervisor"), "{said}");
     }
 }
+
+/// `ralon install --here` — one repository, not a directory of them.
+///
+/// Everything uses `--dry-run`, because the alternative is registering a real
+/// logon task and deregistering the developer's own supervisor. What is under
+/// test is which scope `--here` chooses, and the plan prints it.
+#[cfg(any(windows, target_os = "macos"))]
+mod covering_one_project {
+    use super::*;
+
+    fn plan(machine: &Machine, from: &Path, arguments: &[&str]) -> String {
+        let output = Command::new(BINARY)
+            .arg("--dir")
+            .arg(from)
+            .args(["install", "--dry-run"])
+            .args(arguments)
+            .env("RALON_HOME", &machine.home)
+            .output()
+            .expect("failed to run ralon");
+        stdout(&output)
+    }
+
+    #[test]
+    fn the_scope_is_the_project_and_not_the_home_directory() {
+        let machine = Machine::new();
+        let repository = machine.repository("app", Some(POLICY));
+
+        let said = plan(&machine, &repository.root, &["--here"]);
+        assert!(
+            said.contains(&format!("scope      {}", plain(&repository.root).display())),
+            "{said}"
+        );
+        // The failure this flag exists to avoid: one repository asked for, the
+        // whole home directory registered.
+        assert_eq!(said.matches("scope      ").count(), 1, "{said}");
+    }
+
+    #[test]
+    fn it_finds_the_project_from_a_subdirectory() {
+        let machine = Machine::new();
+        let repository = machine.repository("app", Some(POLICY));
+
+        // Run from `src/`. Scoping to the directory the command was typed in
+        // would exclude agent.lock, which lives at the root — so the project
+        // would be "covered" by a scope that cannot see its policy.
+        let said = plan(&machine, &repository.path("src"), &["--here"]);
+        assert!(
+            said.contains(&format!("scope      {}", plain(&repository.root).display())),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn without_it_a_directory_of_projects_is_still_the_default() {
+        let machine = Machine::new();
+        let repository = machine.repository("app", Some(POLICY));
+
+        let said = plan(
+            &machine,
+            &repository.root,
+            &["--scope", machine.code.to_str().unwrap()],
+        );
+        assert!(
+            said.contains(&format!("scope      {}", plain(&machine.code).display())),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn naming_a_scope_and_asking_for_this_one_is_refused() {
+        let machine = Machine::new();
+        let repository = machine.repository("app", Some(POLICY));
+
+        let attempt = Command::new(BINARY)
+            .arg("--dir")
+            .arg(&repository.root)
+            .args(["install", "--dry-run", "--here", "--scope"])
+            .arg(&machine.code)
+            .env("RALON_HOME", &machine.home)
+            .output()
+            .expect("failed to run ralon");
+
+        // They mean opposite things; silently letting one win would register a
+        // scope the person did not ask for.
+        assert!(!attempt.status.success(), "{}", stdout(&attempt));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Where the supervisor's binary lives, which is a Windows problem specifically.
+// ---------------------------------------------------------------------------
+
+/// Windows will not delete the image of a running process, and the supervisor
+/// runs all day. Registering it from wherever a package manager happened to put
+/// the binary therefore made that package impossible to uninstall — reported
+/// against `bun remove`, and the same for `pip uninstall` and `cargo install
+/// --force`, none of which have any way to know a background process is holding
+/// their file.
+///
+/// The control case is the point of this module. If the first test ever stops
+/// failing to delete, then the platform has changed underneath the fix and the
+/// second test is proving nothing.
+#[cfg(windows)]
+mod the_staged_binary {
+    use super::*;
+
+    /// A copy of `ralon.exe` where a package manager would have put it.
+    fn package_copy(machine: &Machine) -> PathBuf {
+        let directory = machine
+            .home
+            .parent()
+            .unwrap()
+            .join("node_modules/@stoneware-dev/win32-x64/bin");
+        fs::create_dir_all(&directory).unwrap();
+        let copy = directory.join("ralon.exe");
+        fs::copy(BINARY, &copy).unwrap();
+        copy
+    }
+
+    /// Runs `daemon` from `executable` and waits until it has taken the lock,
+    /// so the assertions that follow are about a process that is really there.
+    fn run_daemon(executable: &Path, home: &Path) -> std::process::Child {
+        let child = Command::new(executable)
+            .args(["daemon", "--home"])
+            .arg(home)
+            .spawn()
+            .expect("failed to start the daemon");
+        for _ in 0..100 {
+            if home.join("supervisor.lock").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        child
+    }
+
+    #[test]
+    fn a_supervisor_running_from_the_package_makes_the_package_undeletable() {
+        let machine = Machine::new();
+        let copy = package_copy(&machine);
+
+        let mut daemon = run_daemon(&copy, &machine.home);
+        let refused = fs::remove_file(&copy);
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+
+        // The bug as reported: the file is still there, and the error says
+        // nothing about a running process.
+        assert!(
+            refused.is_err(),
+            "Windows allowed a running image to be deleted — the premise of the \
+             staging fix no longer holds and `the_registration_never_points_into_a_\
+             package_directory` is not testing anything"
+        );
+        assert!(copy.exists());
+    }
+
+    #[test]
+    fn a_supervisor_running_from_the_staged_copy_leaves_the_package_deletable() {
+        let machine = Machine::new();
+        let copy = package_copy(&machine);
+
+        // What `ralon install` now does before it registers anything.
+        let staged = machine.home.join("bin/ralon.exe");
+        fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        fs::copy(&copy, &staged).unwrap();
+
+        let mut daemon = run_daemon(&staged, &machine.home);
+        let removed = fs::remove_file(&copy);
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+
+        // Asserted on the filesystem rather than on the result: the whole
+        // reported symptom was a file that would not go away.
+        assert!(removed.is_ok(), "{removed:?}");
+        assert!(
+            !copy.exists(),
+            "the package manager's copy survived, so uninstalling the package \
+             would still fail"
+        );
+    }
+
+    #[test]
+    fn install_registers_the_staged_copy_and_not_the_one_it_was_run_from() {
+        let machine = Machine::new();
+        let copy = package_copy(&machine);
+
+        // `--dry-run` because registering a real logon task from a test would
+        // deregister the developer's own supervisor. It prints the path it
+        // would register, which is the claim under test.
+        let planned = Command::new(&copy)
+            .args(["install", "--dry-run", "--scope"])
+            .arg(&machine.code)
+            .env("RALON_HOME", &machine.home)
+            .output()
+            .expect("failed to run ralon");
+        let said = stdout(&planned);
+
+        assert!(
+            said.contains(&machine.home.join("bin").display().to_string()),
+            "the plan does not name the staged copy: {said}"
+        );
+        assert!(
+            !said.lines().any(|line| {
+                line.starts_with("supervisor") && line.contains("node_modules")
+            }),
+            "the plan would register a path inside a package directory: {said}"
+        );
+    }
+}

@@ -54,10 +54,11 @@ fn dispatch() -> Result<ExitCode> {
     match cli.command {
         Command::Install {
             scope,
+            here,
             depth,
             no_hooks,
             dry_run,
-        } => commands::install(&scope, depth, no_hooks, dry_run),
+        } => commands::install(&scope, here, &directory, depth, no_hooks, dry_run),
         Command::Scope { action } => match action {
             ScopeAction::Add { directories } => commands::scope_add(&directories),
             ScopeAction::List => commands::scope_list(),

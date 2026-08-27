@@ -50,6 +50,22 @@ pub fn install(executable: &Path, home: &Path) -> Result<Registration> {
     })
 }
 
+/// Unloads the agent without removing the plist, so `install` can replace the
+/// binary it is running from. `install` already calls `bootout` before
+/// `bootstrap`; this is the same thing done earlier, before staging.
+pub fn stop() {
+    let _ = bootout();
+}
+
+/// Loads the agent again after [`stop`].
+pub fn start() -> Result<()> {
+    let path = plist_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    bootstrap(&path)
+}
+
 pub fn uninstall() -> Result<bool> {
     let path = plist_path()?;
     if !path.exists() {

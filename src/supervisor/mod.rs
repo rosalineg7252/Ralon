@@ -26,6 +26,7 @@
 //! command to supervise". The supervisor adds no platform code of its own.
 
 pub mod registry;
+pub mod selfguard;
 pub mod single;
 pub mod volumes;
 pub mod watch;
@@ -335,6 +336,7 @@ impl Supervisor {
                     registry::display(root),
                     applied.len()
                 ));
+                self.note_weaknesses(root);
                 self.registry.set(root, State::Enforced, applied);
             }
             Err(error) => {
@@ -446,6 +448,46 @@ impl Supervisor {
         Ok(protected)
     }
 
+    /// Records what enforcement is about to *not* cover.
+    ///
+    /// A hard link to a protected file, or a project reachable at a second mount
+    /// point, is a hole no backend closes — the locks are taken on the path the
+    /// policy names, and another name for the same bytes is another path. `check`
+    /// and `status` have always said so, but those are commands a person runs;
+    /// under the supervisor nobody runs anything, which is the entire point of
+    /// it, so the one moment this could be said was going by in silence.
+    ///
+    /// It goes in the log rather than blocking enforcement. These are conditions
+    /// to know about, not reasons to leave a project unprotected.
+    fn note_weaknesses(&mut self, root: &Path) {
+        let Ok(policy) = Policy::load(root) else {
+            return;
+        };
+        let Ok(matcher) = Matcher::new(&policy.patterns) else {
+            return;
+        };
+        let Ok(found) = scan::scan(&policy.root, &matcher) else {
+            return;
+        };
+
+        for finding in crate::audit::audit(&policy.root, &found) {
+            self.say(&format!(
+                "warning: {} in {}: {}",
+                finding.subject,
+                registry::display(root),
+                finding.detail
+            ));
+        }
+        for finding in crate::audit::exposed_ancestors(&found) {
+            self.say(&format!(
+                "warning: {} in {}: {}",
+                finding.subject,
+                registry::display(root),
+                finding.detail
+            ));
+        }
+    }
+
     fn say(&mut self, message: &str) {
         if self.verbose {
             println!("ralon: {message}");
@@ -476,6 +518,14 @@ pub fn run(supervisor: &mut Supervisor) -> Result<()> {
     let mut watched = supervisor.registry.config.roots.clone();
     let mut watcher = watch::start(&registrations(&watched, &state));
     supervisor.say(&format!("supervisor started — {}", watcher.describe()));
+
+    // Ralon's own binary and its record of the scopes, held for as long as this
+    // process runs. Neither is a protected path, so nothing else here would ever
+    // have mentioned them being changed.
+    let mut holdings = selfguard::hold(supervisor.registry.home());
+    for warning in std::mem::take(&mut holdings.warnings) {
+        supervisor.say(&format!("warning: {warning}"));
+    }
 
     // Before waiting on anything: the state on disk may have moved on while no
     // supervisor was running, and after a reboot this pass is the whole job.

@@ -4,8 +4,6 @@ A file in your project says what AI agents may not touch:
 
 ```yaml
 # agent.lock
-version: 1
-
 protect:
   - src/index.tsx
   - src/auth.ts
@@ -80,6 +78,13 @@ never heard of Ralon. `ralon status` says which one you are getting and why.
 $ ralon install                # register the supervisor
 $ ralon scope add D:\Projects  # and say where your code actually is
 $ ralon scope add E:\Work
+```
+
+For one repository and nothing else on the machine:
+
+```console
+$ cd my-project
+$ ralon install --here         # this project is the whole scope
 ```
 
 `install` registers a per-user background supervisor with the operating system —
@@ -261,7 +266,8 @@ defeatable for exactly that reason.
 | The project is outside every scope | Not enforced, and `ralon status` says exactly that — `policy found, but this project is outside every scope … it is NOT protected` — followed by the `ralon scope add` that covers it. |
 | A scope's directory is gone (drive unplugged, share unmounted) | Everything else carries on. `ralon scope list` marks it `(unreachable)`. |
 | The agent hook is missing | Still enforced — the agent just sees the filesystem's own error (`EBUSY`, `Access is denied`, `EPERM`) rather than being told why. `ralon hook install` fixes it. |
-| A console window flashes on Windows when the agent edits a file | Your agent is spawning `ralon hook check` without hiding the window — a spawn flag Ralon does not control. Nothing Ralon starts in the background has a window: the supervisor's console is headless and guards are created detached. `ralon install --no-hooks`, or `ralon hook install --agent <one>`, reduces how often it is spawned; enforcement is unaffected either way. |
+| A console window appears on Windows at logon, or at `ralon install` | Fixed. The logon task ran with an interactive token, and a console program started by something with no console of its own gets a fresh, visible one; the task's `Hidden` setting does not affect that, and this project claimed it did. The task now runs in session 0, where there is no desktop for a window to appear on. A machine whose policy withholds the batch logon right falls back to the old behaviour and says so. |
+| A console window flashes when the agent edits a file | Your agent is spawning `ralon hook check` without hiding the window — a spawn flag Ralon does not control. Nothing Ralon starts in the background has one: the supervisor runs in session 0 and guards are created detached. `ralon install --no-hooks`, or `ralon hook install --agent <one>`, reduces how often it is spawned; enforcement is unaffected either way. |
 | `agent.lock` is deleted | Enforcement is released and the record dropped — including when it was deleted while the supervisor was down. |
 
 `ralon status` answers "is the supervisor registered", "is it running" and "is
@@ -320,8 +326,6 @@ yourself, or gate a CI job on it.
 ## The policy file
 
 ```yaml
-version: 1          # required, must be 1
-
 protect:            # paths relative to agent.lock
   - .env            # a file
   - config          # a directory, and everything under it
@@ -336,6 +340,11 @@ protect:            # paths relative to agent.lock
   are rejected rather than quietly reinterpreted.
 - Any command finds the policy by walking up from the working directory, the
   same way `git` finds `.git`.
+- `version:` is optional and means `1`. Files that state it still work;
+  `version: 2` is refused. Unknown keys are refused too, so `protects:` is an
+  error rather than a policy that protects nothing — and an **empty**
+  `agent.lock` is refused for the same reason, because "enforced, protecting
+  nothing" is the one status that must never be reassuring.
 
 ## What the guarantee actually is
 

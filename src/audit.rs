@@ -160,7 +160,118 @@ fn hard_links(protected: &[ProtectedPath]) -> Vec<Finding> {
         .collect()
 }
 
-#[cfg(not(unix))]
+/// The same weakness on NTFS, which has hard links and is where most people
+/// running this happen to be.
+///
+/// This returned an empty list on Windows for as long as the check existed, so
+/// the one platform whose backend is *only* about holding file handles was the
+/// one platform that never warned about a second handle-able name for the same
+/// bytes. The locks are taken on the path the policy names; another name for the
+/// same file is a different path and is not locked, and writing through it
+/// changes the protected file.
+///
+/// `GetFileInformationByHandle` is the only way to ask. There is no metadata API
+/// for it — `std::fs::Metadata` on Windows does not carry a link count — so this
+/// opens the file for nothing but attributes. `FILE_SHARE_*` is passed in full
+/// because a guard may already be holding this very file, and an audit that
+/// could not run while enforcement was on would be useless precisely when it
+/// matters.
+#[cfg(windows)]
+fn hard_links(protected: &[ProtectedPath]) -> Vec<Finding> {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const INVALID_HANDLE: *mut c_void = -1isize as *mut c_void;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ByHandleFileInformation {
+        attributes: u32,
+        creation_time: FileTime,
+        last_access_time: FileTime,
+        last_write_time: FileTime,
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            name: *const u16,
+            access: u32,
+            share: u32,
+            security: *mut c_void,
+            disposition: u32,
+            flags: u32,
+            template: *mut c_void,
+        ) -> *mut c_void;
+        fn GetFileInformationByHandle(
+            file: *mut c_void,
+            information: *mut ByHandleFileInformation,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    fn link_count(path: &Path) -> Option<u32> {
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE || handle.is_null() {
+            return None;
+        }
+        let mut information = ByHandleFileInformation::default();
+        let ok = unsafe { GetFileInformationByHandle(handle, &mut information) };
+        unsafe { CloseHandle(handle) };
+        (ok != 0).then_some(information.number_of_links)
+    }
+
+    protected
+        .iter()
+        .filter(|path| !path.is_dir)
+        .filter_map(|path| {
+            let links = link_count(&path.absolute)?;
+            (links > 1).then(|| Finding {
+                subject: path.relative.clone(),
+                detail: format!(
+                    "has {links} hard links; the other names are not protected and \
+                     writing one changes this file"
+                ),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn hard_links(_protected: &[ProtectedPath]) -> Vec<Finding> {
     Vec::new()
 }
@@ -388,5 +499,41 @@ mod tests {
         assert!(under("/a", "/a"));
         assert!(under("/anything", "/"));
         assert!(!under("/ab", "/a"), "/ab is not inside /a");
+    }
+
+    /// Against a real second name for a real file, on the filesystem, because
+    /// the Windows half of this check returned an empty list for its whole
+    /// existence and every test of it would have passed.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_second_name_for_a_protected_file_is_reported() {
+        let directory = std::env::temp_dir().join(format!("ralon-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let target = directory.join("auth.ts");
+        std::fs::write(&target, "secret").unwrap();
+
+        let protected = |absolute: &Path| ProtectedPath {
+            relative: "auth.ts".into(),
+            absolute: absolute.to_path_buf(),
+            is_dir: false,
+            pattern: "auth.ts".into(),
+        };
+
+        // The control: one name, nothing to say. Without this the test would
+        // pass against an implementation that warned about everything.
+        assert!(
+            hard_links(&[protected(&target)]).is_empty(),
+            "warned about a file with a single name"
+        );
+
+        std::fs::hard_link(&target, directory.join("copy.ts")).unwrap();
+
+        let findings = hard_links(&[protected(&target)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("2 hard links"), "{findings:?}");
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

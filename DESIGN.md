@@ -419,10 +419,34 @@ than `exec`s, so the child is put in a job object with
 so it cannot outlive the locks.
 
 **`guard.rs` — the same locks, with nothing to supervise.** Guards rendezvous
-through a named kernel event (`Local\ralon-guard-<hash of root>`): creating it
-claims the project, waiting on it parks, signalling it asks for a clean
+through a named pipe (`\\.\pipe\ralon-guard-<hash of root>`): creating it claims
+the project, `ConnectNamedPipe` parks, and a client connecting asks for a clean
 release. An object in the kernel rather than a pid file, so a guard that dies
 takes its claim with it and leaves nothing stale.
+
+It was a named event under `Local\`, and the comment beside it said that scoping
+the claim to one logon session matched the boundary of the locks. It did not: a
+share-mode lock is a property of the file object and is refused to every process
+on the machine. The claim was narrower than the thing it claimed, and for as long
+as everything ran in one session nothing noticed. Moving the supervisor to
+session 0 — see *The supervisor*, below — made all of it visible at once:
+duplicate guards, `status` reporting `guard not running` about a running guard,
+and `pause` reporting a project released while its files stayed locked. That last
+one is a false negative about enforcement, which is the failure this program
+exists to prevent.
+
+`\\.\pipe\` is one namespace for the whole machine and needs no privilege to
+create in, unlike `Global\`, which needs `SeCreateGlobalPrivilege` and would have
+meant asking for administrator to fix a bug about window decoration. The pipe
+also carries both halves of the rendezvous, so the claim and the stop signal stay
+one mechanism rather than two that can disagree.
+
+One trap, found immediately by the CLI suite: "is a guard running" must not be
+implemented as "try to create the pipe". `--detach` polls that question in a loop
+while the guard it just spawned races to claim, so the poller wins and the real
+guard is refused as a duplicate. Opening it as a client is worse — connecting is
+the stop signal, so asking would stop it. `WaitNamedPipeW` is the call that
+observes without doing either.
 
 `--detach` uses `CreateProcess` directly with `bInheritHandles = FALSE`.
 `std::process::Command` must pass `TRUE` to hand over stdio, and the background
@@ -490,6 +514,37 @@ Ralon is installed — a home directory on `C:` says nothing about a repository 
 `D:`. Even inside a scope the blast radius is bounded by the policy format:
 patterns are relative and `..`, absolute paths and `~` are rejected, so the most
 a hostile policy achieves by being found is making its own directory read-only.
+
+**Where it runs, on Windows.** The logon task uses the `S4U` logon type, which
+puts the supervisor in session 0. The reason is narrow and the consequences are
+not: `ralon` is a console program, and a console program started by something
+without a console of its own — Task Scheduler — gets a fresh visible window. The
+task's `<Hidden>` setting does not affect that (it controls the Task Scheduler
+listing) and `CREATE_NO_WINDOW` is a creation flag the scheduler does not offer.
+Session 0 has no desktop, so there is nowhere for a window to appear. It needs no
+password and no administrator; a machine whose policy withholds the batch logon
+right falls back to an interactive token and says what that costs.
+
+What it costs generally: a session-0 process has no network credentials, so a
+scope on a mapped drive or a UNC path is not discovered, and `scope add` warns.
+What it did *not* cost is enforcement — locks are kernel handles with no session
+in them, verified by watching a session-0 guard refuse writes, deletes and
+renames from an interactive shell. What it did break, until the claim moved to a
+named pipe, is described under `guard.rs` above.
+
+**What gets registered** is a copy of the binary in Ralon's own state directory,
+not wherever the executable happened to be. Most installs put it inside a package
+manager's tree, and Windows will not delete the image of a running process — so a
+supervisor that ran from `node_modules` made its own package impossible to
+uninstall, with an error about permissions rather than about a running process.
+Uninstalling anyway left the registration pointing at a path that no longer
+existed, retried at every logon, silently. The copy is not a privilege boundary —
+it sits somewhere the user can write, like everywhere else the binary could live
+— it is a place nothing else rewrites on its own schedule. No package manager can
+deregister the supervisor for you: npm stopped running `preuninstall` scripts
+(measured, on npm 11.6.1, against a `postinstall` control that did run), and
+`pip` and `cargo` never had the hook. So `ralon uninstall` is a documented step,
+and `status` reports a registration whose binary has gone.
 
 ---
 

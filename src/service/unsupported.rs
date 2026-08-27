@@ -26,6 +26,13 @@ pub fn install(_executable: &Path, _home: &Path) -> Result<Registration> {
     anyhow::bail!("{}", unsupported_reason())
 }
 
+/// Nothing to stop or start where nothing can be registered.
+pub fn stop() {}
+
+pub fn start() -> Result<()> {
+    Ok(())
+}
+
 pub fn uninstall() -> Result<bool> {
     Ok(false)
 }

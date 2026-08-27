@@ -14,11 +14,34 @@
 //! and the stronger in the way that matters most of the time.
 //!
 //! Two guards for the same project would each try to lock the same files and
-//! the second would lose, so they rendezvous through a named event: creating it
-//! is how a guard claims the project, waiting on it is how it parks, and
-//! signalling it is how `--stop` asks for a clean release. It is an object in
+//! the second would lose, so they rendezvous through a named pipe: creating it
+//! is how a guard claims the project, waiting for a client is how it parks, and
+//! connecting to it is how `--stop` asks for a clean release. It is an object in
 //! the kernel rather than a pid file, so a guard that dies takes its claim with
 //! it and leaves nothing to go stale.
+//!
+//! # Why a pipe and not an event
+//!
+//! It was a named event under `Local\`, with a comment saying that scoping the
+//! claim to the logon session matched the boundary of the locks themselves.
+//! That was wrong, and wrong in the direction that hurts: a share-mode lock is
+//! a property of the file object and is refused to **every process on the
+//! machine**, in any session. The claim was narrower than the thing it claimed.
+//!
+//! For a long time nothing noticed, because everything ran in one session. Then
+//! the supervisor moved to session 0 — where Windows will not put a console
+//! window, see `service/windows.rs` — and the mismatch became visible all at
+//! once: a second guard started for a project that already had one, `status`
+//! reported `guard not running` about a guard that was running, and `pause`
+//! reported a project released while its files stayed locked. That last one is
+//! the failure this whole tool exists to not have.
+//!
+//! A named pipe is the same kind of object with the right scope. `\\.\pipe\` is
+//! one namespace for the whole machine, it needs no privilege to create in —
+//! unlike `Global\`, which needs `SeCreateGlobalPrivilege` and would have meant
+//! asking for administrator — and it carries both halves of the rendezvous:
+//! `CreateNamedPipe` claims, `ConnectNamedPipe` parks, and a client connecting
+//! releases. No polling, no pid, nothing to go stale.
 
 use std::ffi::{c_void, OsStr};
 use std::os::windows::ffi::OsStrExt;
@@ -38,12 +61,25 @@ pub const AVAILABLE: bool = true;
 /// about holding it from a background process instead of a wrapper.
 pub const BACKEND: crate::enforce::Backend = crate::enforce::Backend::Locks;
 
-const INFINITE: u32 = 0xFFFF_FFFF;
-const EVENT_MODIFY_STATE: u32 = 0x0002;
-const SYNCHRONIZE: u32 = 0x0010_0000;
-const ERROR_ALREADY_EXISTS: u32 = 183;
 const TRUE: i32 = 1;
 const FALSE: i32 = 0;
+
+/// A duplex pipe, and this must be the only instance of its name — which is
+/// what turns "create the pipe" into "claim the project": the second guard's
+/// `CreateNamedPipeW` is refused rather than given a second instance.
+const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
+const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
+/// Byte stream, blocking. Nothing is ever sent through it — connecting *is* the
+/// message — so the mode only has to be one both ends agree on.
+const PIPE_TYPE_BYTE: u32 = 0x0000_0000;
+const PIPE_WAIT: u32 = 0x0000_0000;
+
+const INVALID_HANDLE: Handle = -1isize as Handle;
+const ERROR_ACCESS_DENIED: u32 = 5;
+
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE_ACCESS: u32 = 0x4000_0000;
+const OPEN_EXISTING: u32 = 3;
 
 /// Detach the guard from this console so it outlives the shell that started it.
 const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -84,15 +120,27 @@ struct ProcessInformation {
 
 #[link(name = "kernel32")]
 extern "system" {
-    fn CreateEventW(
-        attributes: *mut c_void,
-        manual_reset: i32,
-        initial_state: i32,
+    fn CreateNamedPipeW(
         name: *const u16,
+        open_mode: u32,
+        pipe_mode: u32,
+        max_instances: u32,
+        out_buffer_size: u32,
+        in_buffer_size: u32,
+        default_time_out: u32,
+        security_attributes: *mut c_void,
     ) -> Handle;
+    fn ConnectNamedPipe(pipe: Handle, overlapped: *mut c_void) -> i32;
+    fn DisconnectNamedPipe(pipe: Handle) -> i32;
+    fn WaitNamedPipeW(name: *const u16, timeout: u32) -> i32;
+    /// Only for [`stop_a_guard_from_before_the_pipe`]. Nothing current creates
+    /// an event.
     fn OpenEventW(desired_access: u32, inherit_handle: i32, name: *const u16) -> Handle;
     fn SetEvent(event: Handle) -> i32;
-    fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    /// Wakes the parked `ConnectNamedPipe` from the console-signal handler,
+    /// which runs on a different thread — which is exactly the case `CancelIo`
+    /// cannot handle and this one can.
+    fn CancelIoEx(handle: Handle, overlapped: *mut c_void) -> i32;
     fn CloseHandle(handle: Handle) -> i32;
     fn GetLastError() -> u32;
     fn SetConsoleCtrlHandler(
@@ -124,16 +172,16 @@ extern "system" {
     fn SetStdHandle(std_handle: u32, handle: Handle) -> i32;
 }
 
-/// The event the parked guard is waiting on, so Ctrl-C can release it the same
+/// The pipe the parked guard is waiting on, so Ctrl-C can release it the same
 /// way `--stop` does instead of killing the process and leaving the ACL behind.
 static PARKED_ON: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 unsafe extern "system" fn on_console_signal(_kind: u32) -> i32 {
-    let event = PARKED_ON.load(Ordering::SeqCst);
-    if event.is_null() {
+    let pipe = PARKED_ON.load(Ordering::SeqCst);
+    if pipe.is_null() {
         return FALSE;
     }
-    unsafe { SetEvent(event) };
+    unsafe { CancelIoEx(pipe, std::ptr::null_mut()) };
     // Handled: the wait returns, the locks are dropped in order, and the
     // process exits on its own terms rather than being torn down here.
     TRUE
@@ -141,7 +189,7 @@ unsafe extern "system" fn on_console_signal(_kind: u32) -> i32 {
 
 /// A running guard: the locks, the ACL narrowing, and the claim on the project.
 pub struct Session {
-    event: Handle,
+    claim: Handle,
     locks: locks::Locks,
     narrowing: acl::Narrowing,
     /// Anything the caller should say out loud before parking.
@@ -163,10 +211,16 @@ impl Session {
 
     /// Blocks until someone asks for the locks back.
     pub fn park(self) -> Result<()> {
-        PARKED_ON.store(self.event, Ordering::SeqCst);
+        PARKED_ON.store(self.claim, Ordering::SeqCst);
         unsafe { SetConsoleCtrlHandler(Some(on_console_signal), TRUE) };
 
-        unsafe { WaitForSingleObject(self.event, INFINITE) };
+        // Returns when `stop` connects, when Ctrl-C cancels it, or immediately
+        // with ERROR_PIPE_CONNECTED (535) if a client got in between the pipe
+        // being created and this call. All three mean the same thing here —
+        // stop holding the project — so the result is deliberately not
+        // inspected. A guard that treated the race as an error would exit
+        // without releasing anything.
+        unsafe { ConnectNamedPipe(self.claim, std::ptr::null_mut()) };
 
         PARKED_ON.store(std::ptr::null_mut(), Ordering::SeqCst);
         // `self` is dropped here, in declaration order: the claim is released
@@ -178,22 +232,26 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.event) };
+        unsafe {
+            DisconnectNamedPipe(self.claim);
+            CloseHandle(self.claim);
+        }
     }
 }
 
 /// Takes the locks and claims the project.
 pub fn start(root: &Path, plan: &Plan) -> Result<Session> {
-    let name = event_name(root);
-    let event = unsafe { CreateEventW(std::ptr::null_mut(), TRUE, FALSE, name.as_ptr()) };
-    if event.is_null() {
-        anyhow::bail!("could not claim this project (Windows error {})", unsafe {
-            GetLastError()
-        });
-    }
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        unsafe { CloseHandle(event) };
-        anyhow::bail!("a guard is already protecting this project — `ralon guard --stop` first");
+    let claim = create_claim(root);
+    if claim == INVALID_HANDLE {
+        // Refused because one already exists is the ordinary case and deserves
+        // the ordinary sentence; anything else is a real failure and says so.
+        let error = unsafe { GetLastError() };
+        if error == ERROR_ACCESS_DENIED {
+            anyhow::bail!(
+                "a guard is already protecting this project — `ralon guard --stop` first"
+            );
+        }
+        anyhow::bail!("could not claim this project (Windows error {error})");
     }
 
     // Taken in the same order as `run`, and for the same reason: if a path
@@ -201,14 +259,14 @@ pub fn start(root: &Path, plan: &Plan) -> Result<Session> {
     let locks = match locks::acquire(&plan.pinned, &plan.protected) {
         Ok(locks) => locks,
         Err(error) => {
-            unsafe { CloseHandle(event) };
+            unsafe { CloseHandle(claim) };
             return Err(error);
         }
     };
     let (narrowing, warnings) = acl::refuse_new_entries(&directories(&plan.protected));
 
     Ok(Session {
-        event,
+        claim,
         locks,
         narrowing,
         warnings,
@@ -217,38 +275,121 @@ pub fn start(root: &Path, plan: &Plan) -> Result<Session> {
 
 /// Asks a running guard to release. `false` means there was none.
 pub fn stop(root: &Path) -> Result<bool> {
-    let name = event_name(root);
-    let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, name.as_ptr()) };
-    if event.is_null() {
-        return Ok(false);
+    if !running(root) {
+        return stop_a_guard_from_before_the_pipe(root);
     }
-    let signalled = unsafe { SetEvent(event) } != 0;
-    unsafe { CloseHandle(event) };
-    if !signalled {
-        anyhow::bail!("found a guard but could not ask it to stop");
+
+    // Connecting is the whole message. Nothing is written and nothing is read:
+    // the guard is blocked in `ConnectNamedPipe`, and a client arriving is what
+    // it is waiting for.
+    let client = unsafe {
+        CreateFileW(
+            claim_name(root).as_ptr(),
+            GENERIC_READ | GENERIC_WRITE_ACCESS,
+            0,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if client == INVALID_HANDLE {
+        // It was there a moment ago, so either it has just exited on its own or
+        // something is wrong. The loop below decides which, on the evidence.
+        if !running(root) {
+            return Ok(true);
+        }
+        anyhow::bail!("found a guard but could not ask it to stop (Windows error {})", unsafe {
+            GetLastError()
+        });
     }
+    unsafe { CloseHandle(client) };
 
     // Asking is not the same as having been let go. Waiting for the claim to
     // disappear means that when this returns, the files really are writable —
     // otherwise the next command in a script races the guard's own cleanup.
     for _ in 0..100 {
         if !running(root) {
-            break;
+            return Ok(true);
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    Ok(true)
+    anyhow::bail!("a guard was asked to stop and is still holding this project")
 }
 
 /// Whether a guard currently holds this project.
+///
+/// This has to *observe* the claim without taking it and without connecting to
+/// it, which rules out both of the obvious implementations. Trying to create the
+/// pipe would mean the caller briefly holds the claim — and `detach` polls this
+/// in a loop while the guard it just spawned is racing to claim, so the poller
+/// wins, the real guard is refused as a duplicate, and a working guard reports
+/// "never claimed the project". (Written that way first; the CLI test caught it
+/// immediately.) Opening it as a client is worse: connecting is how `stop` asks
+/// a guard to release, so asking whether one is running would stop it.
+///
+/// `WaitNamedPipeW` is the call that answers the question and does neither.
 pub fn running(root: &Path) -> bool {
-    let name = event_name(root);
-    let event = unsafe { OpenEventW(SYNCHRONIZE, FALSE, name.as_ptr()) };
-    if event.is_null() {
-        return false;
+    /// Return straight away rather than waiting for the server's default
+    /// timeout — this is a question, not an attempt to connect.
+    const NMPWAIT_NOWAIT: u32 = 1;
+
+    unsafe { WaitNamedPipeW(claim_name(root).as_ptr(), NMPWAIT_NOWAIT) != 0 }
+}
+
+/// Releases a guard left over from a version that rendezvoused on a named
+/// event, so that upgrading does not strand one.
+///
+/// Without this, a guard started before the upgrade holds its files with a claim
+/// the new binary cannot see: `--stop` reports there was no guard, `uninstall`
+/// says it released everything, and the files stay locked until the machine is
+/// rebooted or the process is found in Task Manager. That is the exact
+/// experience this release is meant to stop happening, so it would be a poor
+/// trade to fix it for package managers and cause it for upgrades.
+///
+/// Deletable in a later release, once no guard could plausibly predate the pipe.
+/// The event is still `Local\`, so this can only reach a guard in this session —
+/// which is the only place a pre-upgrade guard can be, since the supervisor that
+/// runs in session 0 is itself newer than this code.
+fn stop_a_guard_from_before_the_pipe(root: &Path) -> Result<bool> {
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in root.to_string_lossy().to_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
-    unsafe { CloseHandle(event) };
-    true
+    let name = wide(format!("Local\\ralon-guard-{hash:016x}"));
+
+    let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, FALSE, name.as_ptr()) };
+    if event.is_null() {
+        return Ok(false);
+    }
+    unsafe {
+        SetEvent(event);
+        CloseHandle(event);
+    }
+    // Nothing to wait for: the old guard's claim is invisible to `running`, so
+    // there is no property here that could be polled. It releases its locks on
+    // the way out, in the same order it always did.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(true)
+}
+
+/// Creates the one and only instance of this project's claim pipe.
+fn create_claim(root: &Path) -> Handle {
+    unsafe {
+        CreateNamedPipeW(
+            claim_name(root).as_ptr(),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE | PIPE_WAIT,
+            1, // one instance, so the second guard is refused
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+        )
+    }
 }
 
 /// Starts a guard that outlives this console, and waits to see it come up.
@@ -375,18 +516,26 @@ pub fn clear_leftovers(protected: &[PathBuf]) -> Vec<PathBuf> {
     acl::clear(&directories(protected))
 }
 
-/// A name in the kernel's object namespace, one per project directory.
+/// A name in the kernel's pipe namespace, one per project directory.
 ///
-/// `Local\` scopes it to the logon session, which is the same boundary the
-/// locks themselves have: a guard protects the desktop it is running on.
-fn event_name(root: &Path) -> Vec<u16> {
+/// `\\.\pipe\` is machine-wide, which is the boundary the locks themselves
+/// have: a share-mode lock is refused to every process in every session, so a
+/// claim visible in only one session described something narrower than what it
+/// was claiming. That is not a tidiness point — the supervisor runs in session
+/// 0 and every `ralon` a person types runs in theirs, so a session-local claim
+/// meant `status` and `pause` could not see or stop the guard doing the work.
+///
+/// Hashed rather than spelled out because a pipe name cannot contain `\` after
+/// the prefix, and a project path is mostly `\`. Lower-cased first, so the two
+/// spellings of one directory are one claim.
+fn claim_name(root: &Path) -> Vec<u16> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in root.to_string_lossy().to_lowercase().bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x1000_0000_01b3);
     }
 
-    wide(format!("Local\\ralon-guard-{hash:016x}"))
+    wide(format!("\\\\.\\pipe\\ralon-guard-{hash:016x}"))
 }
 
 /// A NUL-terminated UTF-16 string, which is what every call here wants.
@@ -395,4 +544,46 @@ fn wide(text: impl AsRef<OsStr>) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn name_of(root: &str) -> String {
+        let wide = claim_name(Path::new(root));
+        String::from_utf16_lossy(&wide[..wide.len() - 1])
+    }
+
+    #[test]
+    fn the_claim_is_visible_from_every_session() {
+        // The bug this replaced: the claim lived under `Local\`, which scopes an
+        // object to one logon session, while the locks it stood for are refused
+        // machine-wide. Once the supervisor moved to session 0 that gap meant
+        // `status` could not see the guard doing the work and `pause` reported
+        // projects released that were still locked.
+        let name = name_of("D:\\projects\\app");
+        assert!(name.starts_with("\\\\.\\pipe\\"), "{name}");
+        assert!(!name.contains("Local\\"), "{name}");
+        assert!(!name.contains("Global\\"), "{name}");
+    }
+
+    #[test]
+    fn two_spellings_of_one_project_are_one_claim() {
+        assert_eq!(name_of("D:\\Projects\\App"), name_of("d:\\projects\\app"));
+    }
+
+    #[test]
+    fn different_projects_do_not_share_a_claim() {
+        assert_ne!(name_of("D:\\projects\\app"), name_of("D:\\projects\\other"));
+    }
+
+    #[test]
+    fn a_project_path_cannot_break_out_of_the_pipe_name() {
+        // A pipe name takes no further `\` after the prefix, and a Windows path
+        // is mostly `\`. Hashing is what makes the name legal; this is here so
+        // that a future "readable names would be nicer" change has to notice.
+        let name = name_of("D:\\projects\\app");
+        assert_eq!(name.matches('\\').count(), "\\\\.\\pipe\\".matches('\\').count());
+    }
 }

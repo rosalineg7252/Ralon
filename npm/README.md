@@ -5,8 +5,6 @@ agree.
 
 ```yaml
 # agent.lock — commit it, it is per-repository policy
-version: 1
-
 protect:
   - src/auth.ts
   - .env
@@ -29,6 +27,12 @@ a repository again:
 ```console
 $ ralon install                  # registers a per-user background supervisor
 $ ralon scope add D:\Projects    # …and say where your code actually lives
+```
+
+Or, for a single repository and nothing else on the machine:
+
+```console
+$ cd my-project && ralon install --here
 ```
 
 After that, any repository under a scope that contains an `agent.lock` is
@@ -99,6 +103,27 @@ agent that reaches a protected path is told **"protected by Ralon"**, which file
 and which pattern matched — rather than being handed `EBUSY: resource busy or
 locked` and left to conclude the repository is broken. `--no-hooks` turns that
 off; enforcement does not depend on it.
+
+## Removing it
+
+Run `ralon uninstall` **before** removing the package.
+
+```console
+$ ralon uninstall                # deregister, release every project
+$ npm uninstall -g ralonlock     # or: pip uninstall ralonlock
+```
+
+`ralon install` registers a background process with the operating system, and no
+package manager knows about that. None of them can do it for you either: npm
+stopped running `preuninstall` scripts, and `pip` and `cargo` never had an
+uninstall hook. So this is a step you take, on every platform. Skip it and the
+supervisor stays registered and keeps enforcing after the command used to stop it
+is gone.
+
+The supervisor runs from its own copy of the binary in Ralon's state directory,
+so a package manager's files are never held open and removing the package always
+works. If you removed the package first, the copy is still there and still a
+working `ralon` — `ralon status` will tell you where.
 
 ## About this package
 

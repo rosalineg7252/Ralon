@@ -4,6 +4,103 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
+## Unreleased
+
+Four bugs reported from one Windows install, and one of them was hiding a fifth.
+
+### Changed
+
+- **`version:` is no longer required in `agent.lock`.** It bought a line of
+  ceremony in every policy file and no information — "no version stated" says
+  *version 1* just as well, and stays true forever. Files that state it keep
+  working unchanged, `version: 2` is still rejected, and `ralon init` no longer
+  writes it. What actually validates a policy is that unknown keys are refused,
+  which is why dropping this weakens nothing: `protects:` is still an error
+  rather than a policy protecting nothing.
+
+  One case needed closing to make it safe. With every field defaulting, an
+  **empty** `agent.lock` parsed as a valid policy protecting nothing, and the
+  supervisor would have reported the project `enforced` — so `touch agent.lock`,
+  a truncating crash or a bad merge would have told a developer they were
+  covered while every path was writable. An empty or comment-only policy is now
+  refused with the paths to add.
+
+### Added
+
+- **`ralon install --here`** — cover a single repository rather than a directory
+  of them. For one project you want protected across reboots without declaring
+  where all your code lives. It scopes to the project root even when run from a
+  subdirectory, so `agent.lock` is always inside the scope.
+- **The supervisor protects its own binary and its own scopes.** Both sit in a
+  user-writable directory by design (nothing here asks for administrator), which
+  left two silent paths: replace `bin/ralon.exe` and own the supervisor at the
+  next logon, or delete a line from `config.yaml` and unprotect every project
+  under that scope. A running supervisor now holds both — rename, overwrite,
+  delete and scope-wipe are all refused. `ralon scope add` still works; it asks
+  the supervisor to stand down, writes, and restarts it, with the guards holding
+  their projects throughout. Every scope change made through Ralon is written to
+  the log with what the scopes were before. This is not protection while Ralon
+  is stopped, and it does not stop an agent running `ralon scope remove` — there
+  is no password by design, and that is the same boundary that lets an agent
+  kill a guard. See `security.md`.
+- **Hard-link warnings on Windows.** The check existed but returned an empty
+  list there, so the one platform whose enforcement is entirely about holding
+  file handles never warned about a second name for the same bytes. NTFS has
+  hard links and `mklink /H` needs no privilege.
+- **The supervisor records what enforcement does not cover.** Hard links and
+  exposed ancestors were reported by `check` and `status` — commands a person
+  runs — while under the supervisor nobody runs anything. They now go to the log
+  as each project starts being enforced.
+
+### Fixed
+
+- **`ralon install` restarts a supervisor that is already running.** The logon
+  task's `MultipleInstancesPolicy` is `IgnoreNew`, so `/Run` against a running
+  task does nothing and reports success — an upgrade kept the *previous* binary
+  supervising until the next logon while `ralon --version` reported the new one.
+
+- **No console window at logon, or at `ralon install`.** The logon task ran with
+  an interactive token, and a console program started by something without a
+  console of its own gets a fresh, visible one. The `<Hidden>` setting the task
+  already carried does not affect this and the code claimed it did — `Hidden`
+  controls whether the task appears in the Task Scheduler list. The task now uses
+  the `S4U` logon type, which runs it in session 0, where there is no desktop for
+  a window to appear on. Machines whose policy withholds the batch logon right
+  fall back to the old behaviour and say so rather than failing to install.
+- **`ralon guard --stop`, `pause` and `status` now work across logon sessions.**
+  Found while verifying the fix above, and the more serious of the two: a guard
+  claimed its project with a `Local\` named event, which is scoped to one logon
+  session, while the file locks it stood for are refused to every process on the
+  machine. With the supervisor moved to session 0 this became visible —
+  duplicate guards, `status` reporting `guard not running` about a running guard,
+  and `pause` reporting a project released while its files stayed locked. The
+  claim is now a named pipe, which is machine-wide and needs no privilege. A
+  guard left over from before the upgrade is still released by `--stop`.
+- **Uninstalling the ralon package works on Windows.** `install` registered the
+  binary wherever it found itself, which for `npm`, `bun`, `pip` and `cargo`
+  installs is inside that tool's own directory. Windows will not delete the image
+  of a running process, so `bun remove`, `pip uninstall` and `cargo install
+  --force` all failed on a file the package manager was certain it owned, with an
+  error naming a permission problem rather than a running process. `install` now
+  copies the executable into Ralon's state directory and registers the copy;
+  nothing ever opens the package manager's file.
+- **Removing the package no longer leaves a registration pointing at nothing.**
+  The same change fixes it, since the registered path is one only `ralon
+  uninstall` removes. For installs already in that state, `ralon status` now
+  reports a registration whose binary is missing instead of describing it as
+  healthy. No package manager can deregister it for you — npm stopped running
+  `preuninstall` scripts, and `pip` and `cargo` never had an uninstall hook — so
+  `ralon install` now says to run `ralon uninstall` first, and the README does
+  too.
+- **`ralon uninstall` finishes the job**, removing the staged binary and saying
+  what is left if it cannot.
+
+### Changed
+
+- **`ralon scope add` warns about a network path.** A session-0 supervisor has no
+  network credentials, so it cannot discover projects on a mapped drive or a UNC
+  path. `ralon guard` and `ralon run` are unaffected.
+
 ## 0.1.6
 
 `agent.lock` becomes the thing that activates enforcement. Set the machine up

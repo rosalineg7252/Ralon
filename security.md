@@ -99,9 +99,18 @@ protected file with a second name is reachable through that name: it is an
 ordinary file, not bind-mounted and not carved out of the Landlock grant, and
 writing it changes the protected file's contents. Verified — a write through
 the second name changed `.env` from inside the sandbox. `status` and `run` warn
-when a protected file has more than one link, which is the only notice anyone
+when a protected file has more than one link, and so does the supervisor, into
+its log, at the moment it starts enforcing — which is the only notice anyone
 gets, since nothing about the enforcement can prevent it. (Links created
 *inside* the sandbox are still refused: see "Why it cannot be undone".)
+
+The warning applied to Linux and macOS only until recently: the Windows
+implementation returned an empty list, so the one platform whose backend is
+*entirely* about holding file handles was the one that never mentioned a second
+handle-able name for the same bytes. NTFS has hard links and `mklink /H` needs
+no privilege. It now asks `GetFileInformationByHandle`, which is the only way to
+get a link count on Windows — `std::fs::Metadata` does not carry one — and is
+tested against a real second name rather than a fixture.
 
 **A second path to the same directory bypasses both backends.** This is tested
 and true: if the project is also visible at another mount point — a bind mount
@@ -356,10 +365,64 @@ enforcement.
   same parser the CLI uses. There is nothing in the format for a hostile
   `agent.lock` to escalate with.
 - **Nothing runs as root or administrator.** The Windows registration is a Task
-  Scheduler logon task with `LeastPrivilege` and an interactive token; the macOS
-  one is a LaunchAgent under the user's own `~/Library`. A tool that protects you
-  from an agent should not be the reason a privileged process exists for an agent
-  to talk to.
+  Scheduler logon task with `LeastPrivilege`; the macOS one is a LaunchAgent under
+  the user's own `~/Library`. A tool that protects you from an agent should not be
+  the reason a privileged process exists for an agent to talk to.
+- **The supervisor runs in session 0 on Windows, and its claim is machine-wide.**
+  The logon task uses the `S4U` logon type, which is what keeps a console window
+  from opening at every logon — session 0 has no desktop to open one on. That put
+  the supervisor in a different session from every `ralon` a person types, which
+  matters because a guard's claim used to be a `Local\` named event: scoped to one
+  logon session, while the share-mode locks it stood for are refused to every
+  process on the machine. The claim described something narrower than what it was
+  claiming. The visible result was `status` reporting `guard not running` about a
+  running guard, and `pause` reporting a project released while its files stayed
+  locked — a *false negative about enforcement*, which is the one direction this
+  tool must never get wrong. The claim is now a named pipe under `\\.\pipe\`,
+  which is one namespace for the whole machine and needs no privilege, so the
+  claim's scope and the lock's scope are the same thing. Regression-tested in
+  `enforce/windows/guard.rs`; verified end to end by pausing a session-0 guard
+  from an ordinary terminal and confirming on disk that the file became writable
+  and locked again on `resume`.
+- **The supervisor protects its own binary and its own scopes.** Both live in a
+  directory the user can write, because nothing here asks for administrator —
+  so an agent could replace `bin/ralon.exe` and own the supervisor at the next
+  logon, or delete a line from `config.yaml` and unprotect every project under
+  that scope, without touching a single protected file. While a supervisor is
+  running it holds both: the binary with an exclusive handle (macOS: `chflags
+  uchg`, with the same limitation as everywhere else — `chflags nouchg` undoes
+  it), and `config.yaml` against writers but not readers. Verified by attacking
+  a running install: rename, overwrite, delete and scope-wipe are all refused
+  with the files unchanged afterwards. `ralon scope add` still works — it asks
+  the supervisor to stand down, writes, and starts it again; the guards keep
+  holding their projects throughout, so nothing becomes writable in between.
+
+  Two things this is **not**. It is not protection when no supervisor is
+  running — these are held handles, and a machine with Ralon stopped has an
+  ordinary writable state directory. And it does not stop an agent using
+  Ralon's own interface: anything that can run `ralon scope remove` can remove
+  a scope, because there is no password and no approval step *by design*. That
+  is the same boundary that lets an agent kill a guard. What is closed is the
+  silent path — editing the files directly, with nothing to notice. Every
+  change made through Ralon is appended to the supervisor log with what the
+  scopes were before it.
+
+  An earlier attempt at this kept a fingerprint of `config.yaml` and reported
+  mismatches. It is recorded here because it looked convincing and did not
+  work: the supervisor reconciles within a second of any write to that file,
+  and reconciling means adopting, so a tampered configuration was
+  re-fingerprinted almost immediately and then reported as intact. A check that
+  goes green a second after the attack is worse than no check.
+- **The registered binary is a copy Ralon owns.** `install` copies the executable
+  into the state directory and registers that path, rather than registering
+  wherever the binary happened to be — which for most installs is inside a
+  package manager's directory. This is not a privilege boundary; the copy sits
+  somewhere the user can write, like every other place the binary could live. It
+  removes two failures: a running supervisor made its own package impossible to
+  uninstall on Windows, where the image of a running process cannot be deleted;
+  and removing the package left the registration pointing at a path that no
+  longer existed, failing at every logon in silence. `status` now names a
+  registration whose binary is missing.
 - **A malformed policy enforces nothing and says so.** It is not partially
   applied and does not fall back to a previous policy. Failing *closed* here
   would mean freezing a repository on the strength of a file nobody could read;
@@ -380,6 +443,13 @@ Its limits are the limits of the thing it starts. On Windows a supervisor is a
 process and killing it releases the locks — `run` has nothing to kill, which is
 why it remains the stronger option for an agent you launch yourself. On macOS see
 *The immutable backend, and what it is not*, above.
+
+One consequence of session 0 is worth stating plainly because it is a gap rather
+than a trade: a process there has no network credentials, so a scope on a mapped
+drive or a UNC path is not reachable by the supervisor and projects under it are
+**not** discovered. `ralon scope add` warns when given one. `ralon guard` and
+`ralon run` work there normally — they run in your session — so the answer is to
+use those rather than to expect automatic discovery on a network share.
 
 ## Where there is no enforcement at all
 

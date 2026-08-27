@@ -14,8 +14,6 @@ pub const CURRENT_VERSION: u32 = 1;
 
 /// Written by `ralon init`.
 pub const TEMPLATE: &str = "\
-version: 1
-
 protect:
   - file
   - folder
@@ -24,9 +22,28 @@ protect:
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Raw {
+    /// Optional, and absent means 1.
+    ///
+    /// It was required, and it earned nothing. The field exists so that a
+    /// future format change can be told apart from this one — but "no version
+    /// stated" is a perfectly good way to say *version 1*, and it is a rule that
+    /// stays true forever, so requiring it bought a line of ceremony in every
+    /// policy file and no information.
+    ///
+    /// Dropping the requirement is safe here specifically because it is not what
+    /// validates the file. `deny_unknown_fields` is: a policy with a typo
+    /// (`protects:`) or one that is some other kind of YAML entirely is still
+    /// rejected, rather than parsing as a policy that happens to protect
+    /// nothing. That distinction is the whole risk in this change, and it is
+    /// covered by tests below rather than by argument.
+    #[serde(default = "assume_current_version")]
     version: u32,
     #[serde(default)]
     protect: Vec<String>,
+}
+
+fn assume_current_version() -> u32 {
+    CURRENT_VERSION
 }
 
 /// A parsed, validated policy plus the project root it applies to.
@@ -66,6 +83,28 @@ impl Policy {
     }
 
     pub fn parse(root: PathBuf, file: PathBuf, text: &str) -> Result<Policy> {
+        // An empty document deserializes into every-field-default, which since
+        // `version` stopped being required means an empty `agent.lock` parses
+        // cleanly as a policy that protects nothing. The supervisor would then
+        // report the project `enforced`, and a developer who ran `touch
+        // agent.lock` — or whose file was truncated by a crash or a bad merge —
+        // would be told they are covered while every path is writable.
+        //
+        // Refused here rather than allowed, because "protect nothing" is never
+        // worth expressing and "I meant to write a policy" always is. Caught by
+        // a test rather than by review: this was the one regression that came
+        // with making the version optional.
+        if text.lines().all(|line| {
+            let line = line.trim();
+            line.is_empty() || line == "---" || line.starts_with('#')
+        }) {
+            bail!(
+                "{} is empty, so it protects nothing. Add the paths to protect:\n\
+                 \n    protect:\n      - src/auth.ts\n",
+                file.display()
+            );
+        }
+
         let raw: Raw = serde_yaml_ng::from_str(text)
             .with_context(|| format!("failed to parse {}", file.display()))?;
 
@@ -207,6 +246,58 @@ mod tests {
     #[test]
     fn rejects_unknown_keys() {
         assert!(parse("version: 1\nallow:\n  - src\n").is_err());
+    }
+
+    #[test]
+    fn a_policy_needs_no_version() {
+        let policy = parse("protect:\n  - src/auth.ts\n").unwrap();
+        assert_eq!(policy.version, CURRENT_VERSION);
+        assert_eq!(policy.patterns, ["agent.lock", "src/auth.ts"]);
+    }
+
+    #[test]
+    fn a_policy_that_states_its_version_still_works() {
+        // Every `agent.lock` written before this change says `version: 1`, and
+        // all of them keep working. Dropping the requirement widens what parses;
+        // it must not narrow it.
+        let stated = parse("version: 1\nprotect:\n  - src/auth.ts\n").unwrap();
+        let unstated = parse("protect:\n  - src/auth.ts\n").unwrap();
+        assert_eq!(stated.patterns, unstated.patterns);
+        assert_eq!(stated.version, unstated.version);
+    }
+
+    #[test]
+    fn something_that_is_not_a_policy_is_still_rejected() {
+        // The risk in making `version` optional: a file that means nothing must
+        // not now parse as a policy protecting nothing, because that is the
+        // failure this whole program exists to prevent — a developer believing
+        // they are covered while every path is writable.
+        //
+        // `deny_unknown_fields` is what actually catches these, which is why the
+        // version field was not doing the work its presence implied.
+        for text in [
+            "",                            // empty
+            "\n\n   \n",                   // blank
+            "# just a comment\n",          // nothing but a comment
+            "---\n",                       // an empty document
+            "name: my-app\nversion: 1\n",  // some other project's YAML
+            "protects:\n  - src\n",        // a typo in the only key that matters
+            "- src/auth.ts\n",             // a bare list
+            "protect: src/auth.ts\n",      // a string where a list belongs
+        ] {
+            assert!(
+                parse(text).is_err(),
+                "parsed as a valid policy, protecting nothing: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_template_needs_no_version_either() {
+        // `init` writes TEMPLATE, so if it still said `version: 1` the field
+        // would go on being copied into every new project by the tool itself.
+        assert!(!TEMPLATE.contains("version"), "{TEMPLATE}");
+        assert!(parse(TEMPLATE).is_ok());
     }
 
     #[test]

@@ -23,7 +23,9 @@ mod platform;
 #[path = "unsupported.rs"]
 mod platform;
 
-use std::path::PathBuf;
+pub mod stage;
+
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -53,6 +55,20 @@ pub fn install(executable: &std::path::Path, home: &std::path::Path) -> Result<R
     platform::install(executable, home)
 }
 
+/// Stops a running supervisor, leaving the registration in place.
+///
+/// `install` calls this before replacing the staged binary: a running supervisor
+/// holds that file exclusively, so an upgrade has to ask it to let go rather
+/// than discover it cannot write and fail.
+pub fn stop() {
+    platform::stop();
+}
+
+/// Starts the registered supervisor again. A no-op where none is registered.
+pub fn start() -> Result<()> {
+    platform::start()
+}
+
 /// Removes the registration. `false` means there was none.
 pub fn uninstall() -> Result<bool> {
     platform::uninstall()
@@ -61,6 +77,60 @@ pub fn uninstall() -> Result<bool> {
 /// Whether the registration currently exists.
 pub fn installed() -> bool {
     platform::installed()
+}
+
+/// The executable the registration points at, when that can be read back.
+///
+/// `None` means either that there is no registration or that this platform
+/// cannot report one; [`installed`] is what distinguishes those.
+pub fn registered_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        platform::registered_path()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
+/// A registration left pointing at a binary that is no longer there.
+///
+/// The state a machine reaches by installing Ralon from a package manager,
+/// running `ralon install`, and then removing the package — which is a
+/// perfectly reasonable sequence and used to leave a logon task failing
+/// silently forever. Staging the binary ([`stage`]) stops new installs getting
+/// here; this reports the ones that already did.
+pub fn dangling() -> Option<PathBuf> {
+    let path = registered_path()?;
+    (!path.exists()).then_some(path)
+}
+
+/// Whether a scope is somewhere a session-0 supervisor cannot reach.
+///
+/// Windows only, and specific to the S4U logon type that keeps the console
+/// window from appearing: a process in session 0 runs without network
+/// credentials, so a mapped drive or a UNC path resolves to nothing. Local
+/// fixed drives — which is where source code almost always is — are unaffected.
+///
+/// Reported rather than refused. A scope on a network share is a legitimate
+/// thing to want and the developer is the one who knows whether it matters.
+pub fn network_scope_warning(root: &Path) -> Option<String> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let text = root.to_string_lossy();
+    let unc = text.starts_with("\\\\") && !text.starts_with("\\\\?\\");
+    if !unc {
+        return None;
+    }
+    Some(format!(
+        "{} is a network path. The supervisor runs in a session with no network \
+         credentials — which is what keeps a console window from appearing at every \
+         logon — so it will not see projects there. `ralon guard` and `ralon run` \
+         still work in that directory.",
+        root.display()
+    ))
 }
 
 /// Why there is no supervisor here, for the platforms where there is not.
