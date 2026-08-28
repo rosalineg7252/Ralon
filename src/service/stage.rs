@@ -151,7 +151,8 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("ralon-stage-{name}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("ralon-stage-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         directory

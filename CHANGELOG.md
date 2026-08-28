@@ -4,9 +4,15 @@ Versions follow the rules in `publishing.md`: while on `0.x` the minor is the
 breaking position, and a change to what a policy protects is breaking even when
 the CLI is untouched.
 
-## Unreleased
+## 0.1.7
 
 Four bugs reported from one Windows install, and one of them was hiding a fifth.
+
+None of them touched enforcement itself; all four were about the machinery
+around it — how the supervisor is registered, how a guard is found, and how the
+package is removed. Anyone who installed `0.1.6` on Windows should run `ralon
+uninstall` and reinstall, because the registration written then points at the
+package manager's copy of the binary.
 
 ### Changed
 
@@ -24,6 +30,10 @@ Four bugs reported from one Windows install, and one of them was hiding a fifth.
   a truncating crash or a bad merge would have told a developer they were
   covered while every path was writable. An empty or comment-only policy is now
   refused with the paths to add.
+
+- **`ralon scope add` warns about a network path.** A session-0 supervisor has no
+  network credentials, so it cannot discover projects on a mapped drive or a UNC
+  path. `ralon guard` and `ralon run` are unaffected.
 
 ### Added
 
@@ -95,11 +105,27 @@ Four bugs reported from one Windows install, and one of them was hiding a fifth.
 - **`ralon uninstall` finishes the job**, removing the staged binary and saying
   what is left if it cannot.
 
-### Changed
+### Security
 
-- **`ralon scope add` warns about a network path.** A session-0 supervisor has no
-  network credentials, so it cannot discover projects on a mapped drive or a UNC
-  path. `ralon guard` and `ralon run` are unaffected.
+No bypass of a protected path. Three weaknesses in what surrounds one, all on
+Windows, all present since the supervisor arrived in `0.1.6`:
+
+- **Ralon's own binary and scope list were unprotected while it ran.** Replacing
+  `bin\ralon.exe` took over the supervisor at the next logon; deleting a line
+  from `config.yaml` unprotected every project under that scope at the next
+  reconcile, with nothing reporting either. Both are now held. What remains, by
+  design, is that anything running as you can call `ralon scope remove` — there
+  is no password, and that is the same boundary that lets an agent kill a guard.
+- **Hard links were never warned about on Windows.** `mklink /H` needs no
+  privilege and NTFS has had hard links throughout, so on the one platform whose
+  enforcement is holding file handles, a second writable name for a protected
+  file went unmentioned by `check` and `status`. The files stayed locked through
+  their protected name; the warning is what was missing.
+- **Under the supervisor, nothing reported the warnings at all.** Hard links and
+  exposed ancestors were printed by commands a person runs, and the supervisor
+  runs none. They now go to `supervisor.log` as each project starts.
+
+`ralon run` is unaffected by all three.
 
 ## 0.1.6
 

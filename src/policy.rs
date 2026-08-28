@@ -276,14 +276,14 @@ mod tests {
         // `deny_unknown_fields` is what actually catches these, which is why the
         // version field was not doing the work its presence implied.
         for text in [
-            "",                            // empty
-            "\n\n   \n",                   // blank
-            "# just a comment\n",          // nothing but a comment
-            "---\n",                       // an empty document
-            "name: my-app\nversion: 1\n",  // some other project's YAML
-            "protects:\n  - src\n",        // a typo in the only key that matters
-            "- src/auth.ts\n",             // a bare list
-            "protect: src/auth.ts\n",      // a string where a list belongs
+            "",                           // empty
+            "\n\n   \n",                  // blank
+            "# just a comment\n",         // nothing but a comment
+            "---\n",                      // an empty document
+            "name: my-app\nversion: 1\n", // some other project's YAML
+            "protects:\n  - src\n",       // a typo in the only key that matters
+            "- src/auth.ts\n",            // a bare list
+            "protect: src/auth.ts\n",     // a string where a list belongs
         ] {
             assert!(
                 parse(text).is_err(),

@@ -299,9 +299,10 @@ pub fn stop(root: &Path) -> Result<bool> {
         if !running(root) {
             return Ok(true);
         }
-        anyhow::bail!("found a guard but could not ask it to stop (Windows error {})", unsafe {
-            GetLastError()
-        });
+        anyhow::bail!(
+            "found a guard but could not ask it to stop (Windows error {})",
+            unsafe { GetLastError() }
+        );
     }
     unsafe { CloseHandle(client) };
 
@@ -584,6 +585,9 @@ mod tests {
         // is mostly `\`. Hashing is what makes the name legal; this is here so
         // that a future "readable names would be nicer" change has to notice.
         let name = name_of("D:\\projects\\app");
-        assert_eq!(name.matches('\\').count(), "\\\\.\\pipe\\".matches('\\').count());
+        assert_eq!(
+            name.matches('\\').count(),
+            "\\\\.\\pipe\\".matches('\\').count()
+        );
     }
 }

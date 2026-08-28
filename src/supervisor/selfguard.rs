@@ -52,9 +52,9 @@ use std::path::Path;
 // Windows is the only platform that holds anything open here; macOS uses
 // `chflags`, which needs no handle to stay applied.
 #[cfg(windows)]
-use std::fs::File;
-#[cfg(windows)]
 use anyhow::{Context, Result};
+#[cfg(windows)]
+use std::fs::File;
 
 use super::registry;
 
@@ -78,7 +78,14 @@ pub struct Holdings {
 /// warning, because refusing to supervise would be a worse outcome than
 /// supervising without the extra protection.
 pub fn hold(home: &Path) -> Holdings {
-    let mut warnings = Vec::new();
+    // Linux has no supervisor, so there is nothing of Ralon's own to hold and
+    // both of these go unused. The function still has to exist: `run()` is
+    // compiled on every platform, and only the syscalls are gated.
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = home;
+
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(unused_mut))]
+    let mut warnings: Vec<String> = Vec::new();
 
     #[cfg(windows)]
     let mut held = Vec::new();

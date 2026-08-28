@@ -1441,9 +1441,9 @@ mod the_staged_binary {
             "the plan does not name the staged copy: {said}"
         );
         assert!(
-            !said.lines().any(|line| {
-                line.starts_with("supervisor") && line.contains("node_modules")
-            }),
+            !said
+                .lines()
+                .any(|line| { line.starts_with("supervisor") && line.contains("node_modules") }),
             "the plan would register a path inside a package directory: {said}"
         );
     }

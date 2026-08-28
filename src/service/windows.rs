@@ -192,7 +192,9 @@ pub fn installed() -> bool {
 /// manager and then removed with that package manager. Task Scheduler keeps the
 /// entry, tries it at every logon, fails, and reports nothing anybody reads.
 pub fn registered_path() -> Option<PathBuf> {
-    let output = schtasks(&["/Query", "/TN", TASK, "/XML", "ONE"]).output().ok()?;
+    let output = schtasks(&["/Query", "/TN", TASK, "/XML", "ONE"])
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -443,7 +445,10 @@ mod tests {
     #[test]
     fn the_fallback_is_the_one_that_always_registers() {
         let xml = task(LogonType::Interactive);
-        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"), "{xml}");
+        assert!(
+            xml.contains("<LogonType>InteractiveToken</LogonType>"),
+            "{xml}"
+        );
     }
 
     #[test]

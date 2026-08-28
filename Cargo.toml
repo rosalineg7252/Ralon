@@ -2,7 +2,7 @@
 # The policy file stays `agent.lock`: it is the format, and `ralon` is one tool
 # that enforces it. Every descriptive name in this space was taken.
 name = "ralon"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 # Verified, not guessed: 1.79 was declared and had not been buildable for some
 # time — `clap_lex` now needs edition 2024 and `globset` needs 1.88, so an
