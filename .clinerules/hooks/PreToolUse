@@ -1,6 +1,0 @@
-#!/bin/sh
-# Written by `ralon hook install`. Safe to delete; safe to regenerate.
-#
-# Refuses any tool call that names a path agent.lock protects. `exec` hands the
-# request straight to ralon, so its JSON and its exit code are Cline's answer.
-exec ralon hook check
