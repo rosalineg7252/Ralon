@@ -47,6 +47,16 @@ impl Machine {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
+        fs::create_dir_all(&root).unwrap();
+        // Canonical from here down, because a scope Ralon reports is canonical
+        // and a fixture holding the other spelling of the same directory
+        // compares two strings that are equal on disk and different as text.
+        // This machine's temporary directory is already canonical, so it passed
+        // here and failed on both CI runners: `C:\Users\RUNNER~1\...` is an 8.3
+        // short name, and macOS `/var` is a symlink to `/private/var`.
+        // Reproduced by pointing `TMP` at a short name before fixing it.
+        let root = plain(&fs::canonicalize(&root).unwrap());
+
         let home = root.join("state");
         let code = root.join("code");
         fs::create_dir_all(&home).unwrap();
